@@ -229,7 +229,7 @@ def checks_for(
         if treatment == "domestic":
             return [
                 _journal(ev[0], "Liabilities:AP", credit=inv.gross_minor),
-                _journal(ev[0], "Assets:VAT:Input", debit=inv.vat_minor),
+                _journal(ev[0], "Expenses:VAT:Input", debit=inv.vat_minor),
                 _absent("escalation", refs_contains=num[0]),
             ]
         if treatment == "reverse_charge":

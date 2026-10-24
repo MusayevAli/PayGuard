@@ -2,7 +2,7 @@ SEED ?= 42
 OUT ?= sim/world
 UV ?= uv
 
-.PHONY: world run test lint fonts
+.PHONY: world run test lint fonts fava
 
 world:
 	$(UV) run python -m sim.generate_world --seed $(SEED) --out $(OUT)
@@ -20,3 +20,6 @@ lint:
 
 fonts:
 	$(UV) run python scripts/prepare_fonts.py
+
+fava:
+	$(UV) run fava ledger/payguard.beancount --host 127.0.0.1 --port 5000
