@@ -60,6 +60,6 @@ def world_events(world_dir: Path) -> list[Event]:
     return load_world_events(world_dir)
 
 
-def load_json(path: Path):  # noqa: ANN201 - test helper
+def load_json(path: Path):
     with path.open(encoding="utf-8") as fh:
         return json.load(fh)
