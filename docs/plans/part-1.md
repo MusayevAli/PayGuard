@@ -11,7 +11,7 @@ Scope: `sim/` generator + `core/events.py` + `sim/clock.py` + minimal `api/`. No
 - `sim/fx.py` — ECB `eurofxref-hist.zip` fetch, pinned 46-day source window shifted onto 2026-10-01..11-15, carry-forward for non-business days, `FxFetchError`
 - `sim/mt940.py` — `Statement`/`StatementLine` models, `write_mt940`, `parse_mt940` (round-trip exact)
 - `sim/templates/` — 8 ReportLab templates (`cz_classic`, `cz_totals_top`, `pl_vat`, `pl_vat_columns`, `de_rechnung`, `de_two_page`, `jp_seikyusho`, `us_invoice`), vendored fonts
-- `sim/worldgen/` — `rng.py`, `catalog.py` (SKUs + cs/pl/de/ja names), `suppliers.py` (VAT via stdnum, IBAN via schwifty), `orders.py` (POs, receipts, M4–M6), `invoices.py` (documents: structured/pdf/png/eml, locale formats, A-cases), `scans.py` (pdfium + numpy noise), `bank.py` (statements), `traps.py` (T1–T10, T8 thread), `answer_key.py`
+- `sim/worldgen/` — `rng.py`, `catalog.py` (SKUs + cs/pl/de/ja names), `identifiers.py` + `suppliers.py` (VAT via stdnum, IBAN via schwifty, M1–M3), `plan.py` (PO/shipment/invoice plan model, baseline, format split), `cases.py` (T1–T10, A1–A15, M4–M6), `materialize.py` (POs, receipts, invoice truth, numbering, VAT), `formats.py`, `documents.py` (structured/pdf/png/eml), `scans.py` (pdfium + numpy noise), `bank.py` (statements), `messages.py` (T7/T8/M2 threads), `worldevents.py`, `answer_key.py`
 - `sim/generate_world.py` — CLI `--seed --out`; orchestrates, assigns `ev_NNNNNN` in `known_at` order, writes all outputs
 - `sim/clock.py` — `SimClock(store, world_events, start, speed)`: `pause/resume/step/set_speed/advance_to`, background loop, `day_boundary`
 - `api/main.py`, `api/ws.py`, `api/schemas.py` — `/state`, `/clock/{action}`, `/events`, `WS /live`, §13 error model, `Idempotency-Key`
