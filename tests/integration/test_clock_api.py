@@ -34,7 +34,9 @@ def client(world_dir: Path, tmp_path: Path):
         yield c
 
 
-def test_three_steps_insert_exactly_the_right_events(client: TestClient, world_events: list[Event]) -> None:
+def test_three_steps_insert_exactly_the_right_events(
+    client: TestClient, world_events: list[Event]
+) -> None:
     state = client.get("/state").json()
     start = datetime.fromisoformat(state["sim_now"])
     assert start.isoformat() == "2026-10-01T00:00:00+00:00"
@@ -57,13 +59,19 @@ def test_three_steps_insert_exactly_the_right_events(client: TestClient, world_e
         lo = start + k * day
         hi = lo + day
         got = [e["id"] for e in evs if e["type"] != "day_boundary"]
-        expected = [e.id for e in world_events if (e.known_at < hi if k == 0 else lo <= e.known_at < hi)]
-        assert got == expected, f"step {k + 1}: inserted {len(got)} events, expected {len(expected)}"
+        expected = [
+            e.id for e in world_events if (e.known_at < hi if k == 0 else lo <= e.known_at < hi)
+        ]
+        assert got == expected, (
+            f"step {k + 1}: inserted {len(got)} events, expected {len(expected)}"
+        )
         for e in evs:
             if e["type"] != "day_boundary":
                 assert datetime.fromisoformat(e["known_at"]) < hi
         boundaries = [e["payload"]["date"] for e in evs if e["type"] == "day_boundary"]
-        assert boundaries == (["2026-10-01", "2026-10-02"] if k == 0 else [(lo + day).date().isoformat()])
+        assert boundaries == (
+            ["2026-10-01", "2026-10-02"] if k == 0 else [(lo + day).date().isoformat()]
+        )
 
     seqs = [e["seq"] for e in all_events(client)]
     assert seqs == list(range(1, len(seqs) + 1))
@@ -131,7 +139,9 @@ def test_pause_resume_speed_and_error_model(client: TestClient) -> None:
     assert set(err) == {"code", "message", "hint"} and err["code"] == "invalid_speed"
     r = client.post("/clock/speed", json={})
     assert r.status_code == 400 and r.json()["error"]["hint"]
-    r = client.post("/clock/speed", content=b"not json", headers={"content-type": "application/json"})
+    r = client.post(
+        "/clock/speed", content=b"not json", headers={"content-type": "application/json"}
+    )
     assert r.status_code == 400 and r.json()["error"]["code"] == "validation_error"
     r = client.post("/clock/bogus")
     assert r.status_code == 404 and r.json()["error"]["code"] == "unknown_clock_action"

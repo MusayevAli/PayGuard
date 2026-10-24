@@ -186,9 +186,11 @@ payguard/
 ```python
 @dataclass(frozen=True)
 class Money:
-    minor: int           # integer minor units
-    currency: str        # ISO 4217
-MINOR_DIGITS = {"EUR":2,"CZK":2,"PLN":2,"USD":2,"JPY":0}
+    minor: int  # integer minor units
+    currency: str  # ISO 4217
+
+
+MINOR_DIGITS = {"EUR": 2, "CZK": 2, "PLN": 2, "USD": 2, "JPY": 0}
 ```
 
 - Arithmetic only between same currency; raise otherwise.
@@ -367,11 +369,23 @@ Daily run: open payables sorted by (discount_deadline, due_date); cash per curre
 
 ```python
 PRINCIPALS = {
- "invoice_agent": Scope(post={"Liabilities:AP*","Liabilities:GRNI","Expenses:*"}, request_payment=False, edit_vendor=False, edit_allowlist=False),
- "vendor_agent":  Scope(post=set(), request_payment=False, edit_vendor=True, edit_allowlist=False),
- "payment_agent": Scope(post={"Assets:Bank:*","Liabilities:AP*","Expenses:Bank:*","Expenses:FX:*"}, request_payment=True, edit_vendor=False, edit_allowlist=False),
- "controller":    Scope(approve=True),
- "provisioner":   Scope(edit_allowlist=True),
+    "invoice_agent": Scope(
+        post={"Liabilities:AP*", "Liabilities:GRNI", "Expenses:*"},
+        request_payment=False,
+        edit_vendor=False,
+        edit_allowlist=False,
+    ),
+    "vendor_agent": Scope(
+        post=set(), request_payment=False, edit_vendor=True, edit_allowlist=False
+    ),
+    "payment_agent": Scope(
+        post={"Assets:Bank:*", "Liabilities:AP*", "Expenses:Bank:*", "Expenses:FX:*"},
+        request_payment=True,
+        edit_vendor=False,
+        edit_allowlist=False,
+    ),
+    "controller": Scope(approve=True),
+    "provisioner": Scope(edit_allowlist=True),
 }
 ```
 

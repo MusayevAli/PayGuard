@@ -27,8 +27,15 @@ CSV = """Date,USD,JPY,BGN,CZK,DKK,GBP,HUF,PLN,RON,SEK,CHF,ISK,NOK,TRY,AUD,BRL,CA
 def synthetic_history(start: date, days: int) -> dict[date, dict[str, Decimal]]:
     """Business days only, like the ECB file; rates drift a little each day."""
     hist: dict[date, dict[str, Decimal]] = {}
-    base = {"USD": Decimal("1.0840"), "JPY": Decimal("162.30"), "CZK": Decimal("24.3450"),
-            "PLN": Decimal("4.2680"), "GBP": Decimal("0.8450"), "CHF": Decimal("0.9400"), "HUF": Decimal("395.10")}  # fmt: skip
+    base = {
+        "USD": Decimal("1.0840"),
+        "JPY": Decimal("162.30"),
+        "CZK": Decimal("24.3450"),
+        "PLN": Decimal("4.2680"),
+        "GBP": Decimal("0.8450"),
+        "CHF": Decimal("0.9400"),
+        "HUF": Decimal("395.10"),
+    }
     for i in range(-7, days + 1):
         d = start + timedelta(days=i)
         if d.weekday() >= 5:
@@ -47,8 +54,13 @@ def test_parse_ecb_csv_skips_na_and_keeps_decimals() -> None:
 
 def test_build_fx_table_has_46_dates_eur_base_no_gaps() -> None:
     hist = synthetic_history(SOURCE_WINDOW_START, WINDOW_DAYS)
-    table = build_fx_table(hist, source_start=SOURCE_WINDOW_START, target_start=TARGET_START,
-                           days=WINDOW_DAYS, currencies=CURRENCIES)  # fmt: skip
+    table = build_fx_table(
+        hist,
+        source_start=SOURCE_WINDOW_START,
+        target_start=TARGET_START,
+        days=WINDOW_DAYS,
+        currencies=CURRENCIES,
+    )
     assert table.base == "EUR"
     assert len(table.rates) == 46
     dates = sorted(date.fromisoformat(d) for d in table.rates)
@@ -65,7 +77,9 @@ def test_build_fx_table_has_46_dates_eur_base_no_gaps() -> None:
     fri = table.rates["2026-10-02"]
     assert sat.rates == fri.rates and sat.source_date == fri.source_date
     assert table.source_window.start == SOURCE_WINDOW_START.isoformat()
-    assert rate_for(table, "CZK", date(2026, 10, 1)) == Decimal(fri.rates["CZK"]) - Decimal("0.0001")
+    assert rate_for(table, "CZK", date(2026, 10, 1)) == Decimal(fri.rates["CZK"]) - Decimal(
+        "0.0001"
+    )
 
 
 def test_build_fx_table_raises_instead_of_inventing_rates() -> None:
@@ -74,20 +88,35 @@ def test_build_fx_table_raises_instead_of_inventing_rates() -> None:
         if d >= SOURCE_WINDOW_START + timedelta(days=20):
             del hist[d]  # a 26-day hole: carry-forward must refuse
     with pytest.raises(FxFetchError, match="no ECB rate"):
-        build_fx_table(hist, source_start=SOURCE_WINDOW_START, target_start=TARGET_START,
-                       days=WINDOW_DAYS, currencies=CURRENCIES)  # fmt: skip
+        build_fx_table(
+            hist,
+            source_start=SOURCE_WINDOW_START,
+            target_start=TARGET_START,
+            days=WINDOW_DAYS,
+            currencies=CURRENCIES,
+        )
     hist2 = synthetic_history(SOURCE_WINDOW_START, WINDOW_DAYS)
     for row in hist2.values():
         row.pop("PLN", None)
     with pytest.raises(FxFetchError, match="PLN"):
-        build_fx_table(hist2, source_start=SOURCE_WINDOW_START, target_start=TARGET_START,
-                       days=WINDOW_DAYS, currencies=CURRENCIES)  # fmt: skip
+        build_fx_table(
+            hist2,
+            source_start=SOURCE_WINDOW_START,
+            target_start=TARGET_START,
+            days=WINDOW_DAYS,
+            currencies=CURRENCIES,
+        )
 
 
 def test_write_and_load_round_trip(tmp_path) -> None:
     hist = synthetic_history(SOURCE_WINDOW_START, WINDOW_DAYS)
-    table = build_fx_table(hist, source_start=SOURCE_WINDOW_START, target_start=TARGET_START,
-                           days=WINDOW_DAYS, currencies=CURRENCIES)  # fmt: skip
+    table = build_fx_table(
+        hist,
+        source_start=SOURCE_WINDOW_START,
+        target_start=TARGET_START,
+        days=WINDOW_DAYS,
+        currencies=CURRENCIES,
+    )
     path = tmp_path / "fx_rates.json"
     write_fx_rates(table, path)
     assert load_fx_rates(path) == table
@@ -96,7 +125,9 @@ def test_write_and_load_round_trip(tmp_path) -> None:
 
 def test_fetch_failure_is_loud(tmp_path) -> None:
     with pytest.raises(FxFetchError, match="ECB"):
-        fetch_ecb_history(cache_path=tmp_path / "none.zip", url="http://127.0.0.1:9/nope.zip", timeout=2)
+        fetch_ecb_history(
+            cache_path=tmp_path / "none.zip", url="http://127.0.0.1:9/nope.zip", timeout=2
+        )
     assert not (tmp_path / "none.zip").exists()
 
 
@@ -104,8 +135,13 @@ def test_real_ecb_fetch_covers_pinned_window(tmp_path) -> None:
     cache = tmp_path / "eurofxref-hist.zip"
     hist = fetch_ecb_history(cache_path=cache)
     assert cache.exists() and cache.stat().st_size > 100_000
-    table = build_fx_table(hist, source_start=SOURCE_WINDOW_START, target_start=TARGET_START,
-                           days=WINDOW_DAYS, currencies=CURRENCIES)  # fmt: skip
+    table = build_fx_table(
+        hist,
+        source_start=SOURCE_WINDOW_START,
+        target_start=TARGET_START,
+        days=WINDOW_DAYS,
+        currencies=CURRENCIES,
+    )
     assert len(table.rates) == 46
     assert all(Decimal(v).is_finite() for day in table.rates.values() for v in day.rates.values())
     # second call must be served from the cache even if the network is unreachable
