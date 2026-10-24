@@ -15,6 +15,7 @@ dependencies = [
     "pillow>=10.4",
     "pypdfium2>=4.30",
     "numpy>=2.0",
+    "certifi>=2024.7",
 ]
 
 [dependency-groups]
@@ -67,4 +68,7 @@ warn_required_dynamic_aliases = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra --strict-markers -p no:cacheprovider"
-filterwarnings = ["error::DeprecationWarning:payguard.*"]
+filterwarnings = [
+    "error::DeprecationWarning:payguard.*",
+    "ignore:Using .httpx. with .starlette.testclient. is deprecated:Warning",
+]

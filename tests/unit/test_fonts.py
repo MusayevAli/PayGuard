@@ -23,8 +23,15 @@ def cmap(path: Path) -> set[int]:
 
 
 def test_fonts_exist_with_licenses() -> None:
-    for name in ("DejaVuSans.ttf", "DejaVuSans-Bold.ttf", "NotoSansJP-Regular.ttf", "Caveat-Regular.ttf",
-                 "LICENSE-DejaVu.txt", "OFL-NotoSansJP.txt", "OFL-Caveat.txt"):  # fmt: skip
+    for name in (
+        "DejaVuSans.ttf",
+        "DejaVuSans-Bold.ttf",
+        "NotoSansJP-Regular.ttf",
+        "Caveat-Regular.ttf",
+        "LICENSE-DejaVu.txt",
+        "OFL-NotoSansJP.txt",
+        "OFL-Caveat.txt",
+    ):
         assert (FONTS / name).is_file(), name
 
 
