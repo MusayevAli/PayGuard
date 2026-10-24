@@ -374,7 +374,7 @@ class InvoiceReceived(StrictModel):
 
 class VendorMessage(StrictModel):
     message_id: str
-    channel: Literal["email", "portal", "phone", "judge"]
+    channel: Literal["email", "portal", "phone", "judge", "invoice"]
     vendor_id: str | None
     claimed_supplier_name: str
     from_address: str
@@ -529,6 +529,41 @@ class SystemError(StrictModel):
     recoverable: bool
 
 
+class ScoreTally(StrictModel):
+    caught: int = 0
+    missed: int = 0
+    pending: int = 0
+    fp: int = 0
+
+
+class ScoreUpdate(StrictModel):
+    """Spec §12: emitted by the scoreboard after relevant events."""
+
+    as_of: AwareDatetime
+    headline: ScoreTally
+    ambient: ScoreTally
+    euros_at_risk_prevented_minor: int
+    entries_without_evidence: int
+    cases: list[dict[str, Any]]
+
+
+class ColleagueQuery(StrictModel):
+    """A question an agent asks an internal person (warehouse, buyer); answered by a responder."""
+
+    kind: Literal["warehouse_query", "buyer_confirmation", "verification_request"]
+    to_person: str
+    text: str
+    invoice_id: str | None
+    invoice_number: str | None
+    po_id: str | None
+    line_no: int | None
+    sku: str | None
+    qty_billed: int | None
+    amount_minor: int | None
+    currency: str | None
+    refs: list[str]
+
+
 EventType = Literal[
     "po_created",
     "po_amended",
@@ -548,6 +583,7 @@ EventType = Literal[
     "day_boundary",
     "judge_injection",
     "system_error",
+    "score_update",
 ]
 EVENT_TYPES: tuple[str, ...] = get_args(EventType)
 
@@ -570,6 +606,7 @@ PAYLOAD_MODELS: dict[str, type[BaseModel]] = {
     "day_boundary": DayBoundary,
     "judge_injection": JudgeInjection,
     "system_error": SystemError,
+    "score_update": ScoreUpdate,
 }
 
 

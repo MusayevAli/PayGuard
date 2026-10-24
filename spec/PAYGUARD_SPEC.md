@@ -51,6 +51,8 @@ What's real: agents, rules, ledger, hardware, the attack class. What's simulated
 
 Toyota Boshoku Europe, simulated supplier operations. Plants: Munich (DE), Liberec (CZ), Gliwice (PL). Functional currency EUR; local bank accounts in EUR, CZK, PLN. Fiscal month = calendar month. Timeline: 2026-10-01 to 2026-11-15, so one month-end close (31 Oct) occurs mid-demo.
 
+Entity tax facts (`core/tax.py`): the ledger entity is Toyota Boshoku Europe GmbH, VAT-registered in DE at 19%. DE suppliers charge 19% VAT → Dr Expenses:VAT:Input. CZ/PL/AT suppliers are intra-EU B2B reverse charge → invoice must show 0% VAT with a reverse-charge note; the entity self-assesses: Dr Expenses:VAT:Input 19% / Cr Liabilities:VAT:Output 19% on the same entry. JP/US suppliers are imports with no VAT on the invoice (import VAT is out of scope). An intra-EU supplier charging VAT triggers R11.
+
 Chart of accounts (`core/accounts.py`; posting to any other account is rejected):
 
 ```
@@ -382,7 +384,7 @@ Daily run: open payables sorted by (discount_deadline, due_date); cash per curre
 ```python
 PRINCIPALS = {
     "invoice_agent": Scope(
-        post={"Liabilities:AP*", "Liabilities:GRNI", "Expenses:*"},
+        post={"Liabilities:AP*", "Liabilities:GRNI", "Liabilities:VAT:Output", "Expenses:*"},
         request_payment=False,
         edit_vendor=False,
         edit_allowlist=False,
@@ -396,10 +398,14 @@ PRINCIPALS = {
         edit_vendor=False,
         edit_allowlist=False,
     ),
-    "controller": Scope(approve=True),
+    "controller": Scope(post={"Equity:Opening"}, approve=True),
     "provisioner": Scope(edit_allowlist=True),
+    "bootstrap": Scope(post={"*"}),  # opening balances only; refused once the clock has started
 }
 ```
+
+`bootstrap` may post only while the event store holds no `day_boundary` event; `controller` posts
+nothing but `Equity:Opening` and holds the approve scope (packet decisions, period close/reopen).
 
 `execute(action, principal)` is the only path for side effects. Checks: scope; `requested_by != approved_by`; activation preconditions (§5.3); `provisioner` only with `jumper_present()` true and only for accounts meeting §5.3 invariants. Violations raise `PolicyViolation` and are logged.
 

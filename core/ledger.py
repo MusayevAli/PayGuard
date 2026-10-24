@@ -352,6 +352,7 @@ class Ledger:
         cause_id: str,
         effective_date: date,
         posted_at: datetime | None = None,
+        extra_evidence: list[Evidence] | None = None,
     ) -> JournalEntry:
         """Post a mirrored entry with ``reverses`` set; the original is never modified."""
         original = self.get_entry(entry_id)
@@ -373,7 +374,8 @@ class Ledger:
             cause_type=cause_type,
             cause_id=cause_id,
             lines=mirrored,
-            evidence=list(original.evidence),
+            evidence=list(original.evidence)
+            + [e for e in (extra_evidence or []) if e not in original.evidence],
             reverses=entry_id,
         )
         return self.post(draft, principal, posted_at=posted_at)
@@ -470,9 +472,17 @@ class Ledger:
                 f"period {_month_of(effective_date)} is closed; effective_date {effective_date} cannot be posted",
             )
 
-    @staticmethod
-    def _check_scope(principal: str, accounts: list[str]) -> None:
+    def _check_scope(self, principal: str, accounts: list[str]) -> None:
         scope = PRINCIPALS.get(principal)
+        if (
+            principal == "bootstrap"
+            and self._events is not None
+            and self._events.has_type("day_boundary")
+        ):
+            raise PostRejected(
+                "out_of_scope",
+                "principal 'bootstrap' may only post before the clock starts (a day_boundary event exists)",
+            )
         for account in accounts:
             if not account_in_scope(principal, account):
                 allowed = (
@@ -677,23 +687,51 @@ class Ledger:
         assert payable is not None
         return payable
 
+    def set_payable_amount(self, payable_id: str, amount_minor: int) -> Payable:
+        """Adjust an open payable (credit notes net against it). Amounts stay integers."""
+        with self._lock:
+            cur = self._con.execute(
+                "UPDATE payables SET amount_minor = ? WHERE id = ?", (amount_minor, payable_id)
+            )
+            if cur.rowcount != 1:
+                raise LedgerError("unknown_payable", f"no payable {payable_id}")
+        payable = self.get_payable(payable_id)
+        assert payable is not None
+        return payable
+
+    @staticmethod
+    def is_retention_payable(p: Payable) -> bool:
+        return (p.held_reason or "").startswith("retention")
+
     def ap_open_items(self, vendor_id: str | None = None) -> list[Payable]:
-        return [p for p in self.payables(vendor_id=vendor_id) if p.status in OPEN_AP_STATUSES]
+        return [
+            p
+            for p in self.payables(vendor_id=vendor_id)
+            if p.status in OPEN_AP_STATUSES and not self.is_retention_payable(p)
+        ]
 
     def ap_control_reconciles(
         self, as_of_effective_date: date | None = None, as_of_known_at: datetime | None = None
     ) -> Reconciliation:
-        """Σ open payables must equal the AP control balance per currency (retention likewise)."""
+        """Σ open payables must equal the AP control balance per currency; retention payables
+        (``held_reason`` starting with ``retention``) and ``retention_minor`` equal AP:Retention."""
         as_of = as_of_effective_date or date(9999, 12, 31)
         ap = self.balance(AP_ACCOUNT, as_of, as_of_known_at)
         retention = self.balance(AP_RETENTION_ACCOUNT, as_of, as_of_known_at)
         open_items = self.ap_open_items()
-        retained = [p for p in self.payables() if p.status != "rejected"]
+        all_payables = self.payables()
+        retained = [
+            p for p in all_payables if p.status != "rejected" and not self.is_retention_payable(p)
+        ]
+        retention_items = [
+            p for p in all_payables if self.is_retention_payable(p) and p.status in OPEN_AP_STATUSES
+        ]
         currencies = (
             set(ap)
             | set(retention)
             | {p.currency for p in open_items}
             | {p.currency for p in retained if p.retention_minor}
+            | {p.currency for p in retention_items}
         )
         rows: dict[str, ReconciliationRow] = {}
         for ccy in sorted(currencies):
@@ -702,7 +740,8 @@ class Ledger:
                 ap_balance_minor=-ap.get(ccy, 0),
                 retention_payables_minor=sum(
                     p.retention_minor for p in retained if p.currency == ccy
-                ),
+                )
+                + sum(p.amount_minor for p in retention_items if p.currency == ccy),
                 retention_balance_minor=-retention.get(ccy, 0),
             )
         return Reconciliation(ok=all(r.ok for r in rows.values()), per_currency=rows)

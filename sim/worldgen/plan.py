@@ -7,6 +7,7 @@ from __future__ import annotations
 import random
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
+from itertools import pairwise
 from typing import Literal
 
 from sim.models import InvoiceFormat, Plant, Supplier, Uom
@@ -239,6 +240,18 @@ def split_qty(rng: random.Random, qty: int, parts: int) -> list[int]:
     return [max(1, p) for p in pieces]
 
 
+GAP_SUPPLIER_EARLIEST_KNOWN = date(2026, 10, 21)
+
+
+def has_price_gap(supplier: Supplier) -> bool:
+    """True when two consecutive price lists leave at least one uncovered day."""
+    lists = sorted(supplier.price_lists, key=lambda p: p.effective_from)
+    return any(
+        a.effective_to is not None and a.effective_to + timedelta(days=1) < b.effective_from
+        for a, b in pairwise(lists)
+    )
+
+
 def baseline_po(
     rng: random.Random, supplier: Supplier, n_shipments: int, first_known_at: datetime
 ) -> POPlan:
@@ -321,6 +334,13 @@ def build_baseline(
     for supplier, k in zip(picks, counts, strict=True):
         latest = END - timedelta(days=5 * (k - 1))
         first = sample_known_at(rng, InvoiceFormat.PDF, latest=latest)
+        if has_price_gap(supplier):
+            # the gap (M3) is one planted ambiguity: the supplier's ordinary invoices are dated
+            # after its new list takes effect, so only the planted invoice falls inside the gap
+            guard = 0
+            while first.date() < GAP_SUPPLIER_EARLIEST_KNOWN and guard < 50:
+                first = sample_known_at(rng, InvoiceFormat.PDF, latest=latest)
+                guard += 1
         plan = baseline_po(rng, supplier, k, first)
         guard = 0
         while sum(len(sh.invoices) for sh in plan.shipments) != k and guard < 20:

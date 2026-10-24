@@ -203,6 +203,13 @@ class EventStore:
             row = self._con.execute("SELECT COUNT(*) FROM events").fetchone()
         return int(row[0])
 
+    def has_type(self, type_: str) -> bool:
+        with self._lock:
+            row = self._con.execute(
+                "SELECT 1 FROM events WHERE type = ? LIMIT 1", (type_,)
+            ).fetchone()
+        return row is not None
+
     def exists(self, event_id: str) -> bool:
         with self._lock:
             return (
@@ -220,6 +227,13 @@ class EventStore:
                 (agent, event_id, _iso(handled_at)),
             )
             return cur.rowcount == 1
+
+    def handled_by_any(self, event_id: str) -> bool:
+        with self._lock:
+            row = self._con.execute(
+                "SELECT 1 FROM agent_cursors WHERE event_id = ? LIMIT 1", (event_id,)
+            ).fetchone()
+        return row is not None
 
     def is_handled(self, agent: str, event_id: str) -> bool:
         with self._lock:
