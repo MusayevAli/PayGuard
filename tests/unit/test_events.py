@@ -12,12 +12,25 @@ T0 = datetime(2026, 10, 1, 8, 0, tzinfo=UTC)
 
 
 def db_payload(i: int) -> dict:
-    return {"date": f"2026-10-{i:02d}", "day_index": i - 1, "previous_date": None, "month_closed": None}
+    return {
+        "date": f"2026-10-{i:02d}",
+        "day_index": i - 1,
+        "previous_date": None,
+        "month_closed": None,
+    }
 
 
 def mk(i: int, **kw) -> Event:
-    return Event(id=f"ev_{i:06d}", type="day_boundary", event_time=T0 + timedelta(days=i),
-                 known_at=T0 + timedelta(days=i), source="clock", actor=None, payload=db_payload(i), **kw)  # fmt: skip
+    return Event(
+        id=f"ev_{i:06d}",
+        type="day_boundary",
+        event_time=T0 + timedelta(days=i),
+        known_at=T0 + timedelta(days=i),
+        source="clock",
+        actor=None,
+        payload=db_payload(i),
+        **kw,
+    )
 
 
 @pytest.fixture
@@ -34,10 +47,22 @@ def test_schema_and_pragmas(store: EventStore, tmp_path) -> None:
         tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         assert {"events", "agent_cursors"} <= tables
         cols = {r[1] for r in con.execute("PRAGMA table_info(events)")}
-        assert cols == {"id", "seq", "type", "event_time", "known_at", "source", "actor", "payload", "content_hash"}
+        assert cols == {
+            "id",
+            "seq",
+            "type",
+            "event_time",
+            "known_at",
+            "source",
+            "actor",
+            "payload",
+            "content_hash",
+        }
         idx = {r[1] for r in con.execute("PRAGMA index_list(events)")}
         assert "ix_events_type_seq" in idx
-        triggers = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='trigger'")}
+        triggers = {
+            r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='trigger'")
+        }
         assert len(triggers) >= 2
     finally:
         con.close()
@@ -64,15 +89,31 @@ def test_append_is_idempotent_on_content_hash(store: EventStore) -> None:
     assert again.inserted is False
     assert again.event.seq == first.event.seq == 1
     # same content under a different id is still the same event (idempotent), nothing new stored
-    dup = Event(id="ev_999999", type="day_boundary", event_time=T0, known_at=T0, source="clock",
-                actor=None, payload=db_payload(1))  # fmt: skip
+    dup = Event(
+        id="ev_999999",
+        type="day_boundary",
+        event_time=T0,
+        known_at=T0,
+        source="clock",
+        actor=None,
+        payload=db_payload(1),
+    )
     res = store.append(dup)
     assert res.inserted is False and res.event.id == "ev_000001"
     assert store.count() == 1
     # same id with different content is a conflict, never silently accepted
     with pytest.raises(EventConflict):
-        store.append(Event(id="ev_000001", type="day_boundary", event_time=T0, known_at=T0,
-                           source="clock", actor=None, payload=db_payload(2)))  # fmt: skip
+        store.append(
+            Event(
+                id="ev_000001",
+                type="day_boundary",
+                event_time=T0,
+                known_at=T0,
+                source="clock",
+                actor=None,
+                payload=db_payload(2),
+            )
+        )
     assert store.count() == 1
 
 
@@ -109,7 +150,9 @@ def test_content_hash_is_sha256_over_type_and_canonical_payload() -> None:
 
 def test_make_event_derives_a_stable_id() -> None:
     e1 = make_event("day_boundary", db_payload(1), event_time=T0, source="clock")
-    e2 = make_event("day_boundary", db_payload(1), event_time=T0 + timedelta(hours=5), source="clock")
+    e2 = make_event(
+        "day_boundary", db_payload(1), event_time=T0 + timedelta(hours=5), source="clock"
+    )
     assert e1.id == e2.id and e1.id.startswith("ev_")
     assert e1.known_at == e1.event_time
     assert make_event("day_boundary", db_payload(2), event_time=T0, source="clock").id != e1.id

@@ -23,9 +23,25 @@ from fontTools.varLib import instancer
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "sim" / "templates" / "fonts"
 
-LATIN_RANGES = [(0x0020, 0x024F), (0x02B0, 0x036F), (0x2000, 0x206F), (0x20A0, 0x20CF),
-                (0x2100, 0x214F), (0x2190, 0x21FF), (0x2200, 0x22FF), (0x25A0, 0x25FF), (0x2600, 0x26FF)]  # fmt: skip
-JP_RANGES = [(0x0020, 0x00FF), (0x2000, 0x206F), (0x20A0, 0x20CF), (0x3000, 0x30FF), (0xFF00, 0xFFEF)]
+LATIN_RANGES = [
+    (0x0020, 0x024F),
+    (0x02B0, 0x036F),
+    (0x2000, 0x206F),
+    (0x20A0, 0x20CF),
+    (0x2100, 0x214F),
+    (0x2190, 0x21FF),
+    (0x2200, 0x22FF),
+    (0x25A0, 0x25FF),
+    (0x2600, 0x26FF),
+]
+JP_RANGES = [
+    (0x0020, 0x00FF),
+    (0x2000, 0x206F),
+    (0x20A0, 0x20CF),
+    (0x3000, 0x30FF),
+    (0xFF00, 0xFFEF),
+]
+ESSENTIAL_JP = "円税込合計請求書番号発行日支払期限登録御中小計消費振込先銀行支店普通口座名義備考株式会社年月日様"
 
 
 def unicodes(ranges: list[tuple[int, int]]) -> set[int]:
@@ -42,7 +58,9 @@ def used_non_ascii() -> set[int]:
     return chars
 
 
-def write_subset(src: Path, dst: Path, codepoints: set[int], *, static_weight: float | None = None) -> None:
+def write_subset(
+    src: Path, dst: Path, codepoints: set[int], *, static_weight: float | None = None
+) -> None:
     font = TTFont(src)
     if static_weight is not None and "fvar" in font:
         font = instancer.instantiateVariableFont(font, {"wght": static_weight}, inplace=False)
@@ -72,11 +90,15 @@ def main() -> None:
     write_subset(dejavu / "ttf" / "DejaVuSans.ttf", OUT / "DejaVuSans.ttf", latin)
     write_subset(dejavu / "ttf" / "DejaVuSans-Bold.ttf", OUT / "DejaVuSans-Bold.ttf", latin)
     shutil.copyfile(dejavu / "LICENSE", OUT / "LICENSE-DejaVu.txt")
-    jp = unicodes(JP_RANGES) | used_non_ascii()
+    jp = unicodes(JP_RANGES) | used_non_ascii() | {ord(ch) for ch in ESSENTIAL_JP}
     write_subset(src / "NotoSansJP.ttf", OUT / "NotoSansJP-Regular.ttf", jp, static_weight=400)
     shutil.copyfile(src / "NotoSansJP-OFL.txt", OUT / "OFL-NotoSansJP.txt")
-    write_subset(src / "Caveat.ttf", OUT / "Caveat-Regular.ttf", unicodes([(0x0020, 0x024F), (0x2010, 0x2027)]),
-                 static_weight=400)  # fmt: skip
+    write_subset(
+        src / "Caveat.ttf",
+        OUT / "Caveat-Regular.ttf",
+        unicodes([(0x0020, 0x024F), (0x2010, 0x2027)]),
+        static_weight=400,
+    )
     shutil.copyfile(src / "Caveat-OFL.txt", OUT / "OFL-Caveat.txt")
 
 

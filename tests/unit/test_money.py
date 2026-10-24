@@ -42,13 +42,19 @@ def test_money_jpy_has_no_minor_unit() -> None:
     assert y.as_decimal() == Decimal("123456")
     assert Money.from_decimal(Decimal("123456"), "JPY") == y
     with pytest.raises(ValueError):
-        Money.from_decimal(Decimal("12.5"), "JPY")  # no rounding mode given: sub-unit precision is an error
+        Money.from_decimal(
+            Decimal("12.5"), "JPY"
+        )  # no rounding mode given: sub-unit precision is an error
     assert Money.from_decimal(Decimal("12.5"), "JPY", rounding=ROUND_HALF_EVEN) == Money(12, "JPY")
     assert Money(1000, "EUR").as_decimal() == Decimal("10.00")
     with pytest.raises(ValueError):
         Money.from_decimal(Decimal("10.005"), "EUR")
-    assert Money.from_decimal(Decimal("10.005"), "EUR", rounding=ROUND_HALF_EVEN) == Money(1000, "EUR")
-    assert Money.from_decimal(Decimal("10.015"), "EUR", rounding=ROUND_HALF_EVEN) == Money(1002, "EUR")
+    assert Money.from_decimal(Decimal("10.005"), "EUR", rounding=ROUND_HALF_EVEN) == Money(
+        1000, "EUR"
+    )
+    assert Money.from_decimal(Decimal("10.015"), "EUR", rounding=ROUND_HALF_EVEN) == Money(
+        1002, "EUR"
+    )
 
 
 def test_money_scale_uses_half_even() -> None:
@@ -104,5 +110,7 @@ def test_parse_locale_amount_known_cases(text: str, currency: str, hint, expecte
         ("1.23.4", "EUR", "1.234,56"),
     ],
 )
-def test_parse_locale_amount_ambiguous_or_invalid_returns_none(text: str, currency: str, hint) -> None:
+def test_parse_locale_amount_ambiguous_or_invalid_returns_none(
+    text: str, currency: str, hint
+) -> None:
     assert parse_locale_amount(text, currency, hint) is None
