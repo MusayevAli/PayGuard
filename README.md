@@ -12,7 +12,8 @@ the company, its suppliers, bank, documents and people.
 |---|---|---|
 | 1 | World generator, append-only event store, simulation clock, streaming API | done |
 | 2 | Money/FX, chart of accounts, append-only ledger, policy, packets, bootstrap, Beancount + Fava | done |
-| 3–8 | Agents, signer, bank, people, UI, hardware, rehearsal | not started |
+| 3 | Agent runner, LLM boundary, invoice agent (R0–R7, R11–R15), scripted colleagues, scoreboard | done (API-backed runs need credentials, see below) |
+| 4–8 | Vendor/payment agents, signer, bank, people, UI, hardware, rehearsal | not started |
 
 ## Running the simulation
 
@@ -103,6 +104,67 @@ make fava                                      # http://127.0.0.1:5000 (ledger s
 ```
 
 Fava watches the file, so it refreshes as the ledger posts.
+
+## Invoice agent (Part 3)
+
+Run the world through the invoice agent only, from 1 Oct to 5 Nov 2026:
+
+```bash
+export ANTHROPIC_API_KEY=...                    # or `ant auth login`; nothing else reads the key
+uv run python -m scripts.run_world --until 2026-11-05 --out runs/part3
+```
+
+The script bootstraps the ledger, steps the clock one sim day at a time, drains the agents after
+every step, scores against the answer key and prints the scoreboard, API usage and cost. Without
+credentials the two API-backed tests (`tests/integration/test_extraction_accuracy.py` and
+`tests/integration/test_invoice_agent_world.py`) **fail** with a message saying so; they never
+skip. `tests/integration/test_invoice_agent_world_offline.py` runs the same world with a
+truth-backed extractor that lives under `tests/` (the ground truth is readable only from
+`core/score.py` and tests; `tests/unit/test_no_truth_in_agents.py` enforces that).
+
+### What the LLM decides, and what it does not
+
+The model is a document reader and a writer. It **does**:
+
+- extract fields from PDFs (rendered at 150 dpi), scans and e-mails into a strict JSON schema
+  (`agents/llm.py`, the only module that imports `anthropic`), with locale hints when the sender is
+  known; every call is logged with model, tokens and latency and cached by document SHA-256;
+- write the one-sentence explanation attached to every `agent_action` (≤ 60 words, only ids that
+  appear in the decision; a deterministic template is used when it fails twice or when no
+  credentials are present);
+- phrase short-pay notices and warehouse queries from a template skeleton (amounts and ids are
+  validated against the facts after generation).
+
+It does **not** decide anything: amounts are re-parsed under the supplier locale and reconciled
+(Σ lines = net, net + VAT = gross, within `ROUNDING_TOL_MINOR`) by `agents/validate.py`;
+structured invoices (30 %) never reach the model (`agents/structured_mapper.py`); vendor and PO
+resolution, receipts, prices, VAT, duplicates, postings and payables are deterministic Python in
+`agents/invoice_agent.py`, and every side effect goes through `Context.act` → `policy.execute`.
+
+### Rules
+
+| Rule | Trigger | Action |
+|---|---|---|
+| R0 | totals do not reconcile after one re-extraction | hold `unreadable_invoice`, packet |
+| R1 | billed quantity > received | post min(billed, received), `short_pay_notice`, balance kept on the PO line |
+| R2a | unit price within 200 bp of the agreed PO price | post at invoice price |
+| R2b | variance above 200 bp | hold `price_variance`, packet |
+| R3 | no goods receipt | ask Jonas (`asked_colleague`), wait 48 h, re-run on reply or receipt, escalate on expiry |
+| R4 | same vendor, total within 50 bp, dates within 3 days, different number | `duplicate_rejected` citing the original |
+| R5 | vendor not in the master (VAT id, then normalised name) | hold `held_unknown_vendor`, `onboarding_opened` |
+| R6 | credit note | proportional reversal of the original entry (`Money.allocate`), payable reduced |
+| R7 | month end: receipts not invoiced | one GRNI accrual per PO at PO price; reversed when the invoice posts |
+| R11 | intra-EU supplier charges VAT | post net, self-assess 19 %, dispute VAT, packet above EUR 500 |
+| R12 | rounding difference ≤ 5 minor units | post, difference to `Expenses:FX:Rounding` |
+| R13 | no PO, freight-like | post to `Expenses:Freight`; buyer confirmation above EUR 2,000 |
+| R14 | invoice dated before the PO | hold `invoice_dated_before_po`, packet |
+| R15 | retention clause on the document | split `Liabilities:AP` / `Liabilities:AP:Retention`, two payables |
+| M3 | invoice date in a price-list gap | hold `price_list_gap`, packet naming both candidate lists |
+| M5/M6 | receipt on the wrong line / in the wrong unit | ask Jonas, reassign the receipt on confirmation |
+
+Entity tax facts (spec §2.1): DE suppliers charge 19 % (`Expenses:VAT:Input`); CZ/PL/AT supplies
+are reverse charge and the entity self-assesses `Expenses:VAT:Input` / `Liabilities:VAT:Output` on
+the same entry; JP/US are imports without VAT.
 
 ## Layout
 

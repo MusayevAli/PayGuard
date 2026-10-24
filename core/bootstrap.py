@@ -54,7 +54,7 @@ def bootstrap(
     vendors: VendorMaster,
     *,
     suppliers: Sequence[Supplier],
-    principal: str = "controller",
+    principal: str = "bootstrap",
     posted_at: datetime = OPENING_POSTED_AT,
 ) -> BootstrapResult:
     decision = events.append(
@@ -64,7 +64,7 @@ def bootstrap(
                 "packet_id": "BOOTSTRAP-OPENING",
                 "decision": "opening_balances",
                 "note": "Opening balances at 2026-09-30 per spec §2.7; legacy AP for the September invoices settled by PAY-BATCH-0001 on 2 Oct",
-                "decided_by": principal,
+                "decided_by": "controller",
                 "via": "api",
             },
             event_time=posted_at - timedelta(minutes=1),

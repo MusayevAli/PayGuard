@@ -64,7 +64,7 @@ def test_bootstrap_is_idempotent_and_reconciles(
         assert all(p.due_date >= date(2026, 10, 2) for p in payables)
         for entry in ledger.entries():
             assert (
-                entry.posted_by == "controller"
+                entry.posted_by == "bootstrap"
                 and entry.cause_type == "opening"
                 and entry.effective_date == as_of
             )

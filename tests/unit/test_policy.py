@@ -143,9 +143,12 @@ def test_principals_table_matches_spec() -> None:
         "payment_agent",
         "controller",
         "provisioner",
+        "bootstrap",
     }
     assert PRINCIPALS["invoice_agent"] == Scope(
-        post=frozenset({"Liabilities:AP*", "Liabilities:GRNI", "Expenses:*"}),
+        post=frozenset(
+            {"Liabilities:AP*", "Liabilities:GRNI", "Liabilities:VAT:Output", "Expenses:*"}
+        ),
         request_payment=False,
         edit_vendor=False,
         edit_allowlist=False,
@@ -159,11 +162,11 @@ def test_principals_table_matches_spec() -> None:
         edit_vendor=False,
         edit_allowlist=False,
     )
-    assert PRINCIPALS["controller"] == Scope(approve=True)
+    assert PRINCIPALS["controller"] == Scope(post={"Equity:Opening"}, approve=True)
+    assert PRINCIPALS["bootstrap"] == Scope(post={"*"})
     assert PRINCIPALS["provisioner"] == Scope(edit_allowlist=True)
     assert (
-        PRINCIPALS["controller"].post == frozenset()
-        and PRINCIPALS["controller"].edit_vendor is False
+        PRINCIPALS["controller"].edit_vendor is False and PRINCIPALS["bootstrap"].approve is False
     )
 
 
@@ -176,7 +179,7 @@ def test_principals_table_matches_spec() -> None:
         ("invoice_agent", "Expenses:Materials:Foam", True),
         ("invoice_agent", "Expenses:FX:Rounding", True),
         ("invoice_agent", "Assets:Bank:EUR", False),
-        ("invoice_agent", "Liabilities:VAT:Output", False),
+        ("invoice_agent", "Liabilities:VAT:Output", True),
         ("invoice_agent", "Equity:Opening", False),
         ("invoice_agent", "Assets:Prepayments", False),
         ("vendor_agent", "Liabilities:AP", False),
@@ -192,8 +195,11 @@ def test_principals_table_matches_spec() -> None:
         ("payment_agent", "Liabilities:GRNI", False),
         ("payment_agent", "Equity:Opening", False),
         ("controller", "Equity:Opening", True),
-        ("controller", "Assets:Bank:EUR", True),
-        ("controller", "Liabilities:VAT:Output", True),
+        ("controller", "Assets:Bank:EUR", False),
+        ("controller", "Liabilities:VAT:Output", False),
+        ("bootstrap", "Equity:Opening", True),
+        ("bootstrap", "Assets:Bank:EUR", True),
+        ("bootstrap", "Liabilities:AP", True),
         ("provisioner", "Liabilities:AP", False),
         ("provisioner", "Expenses:Freight", False),
         ("nobody", "Liabilities:AP", False),
@@ -385,3 +391,41 @@ def test_close_period_requires_approve_scope(env: Env) -> None:
     assert violations(env)[-1]["agent"] == "invoice_agent"
     env.policy.execute(ClosePeriodAction(month="2026-09"), "controller")
     assert env.ledger.period_status("2026-09") == "closed"
+
+
+def test_bootstrap_principal_only_before_the_clock_starts(env: Env) -> None:
+    opening = JournalEntryDraft(
+        effective_date=date(2026, 9, 30),
+        description="opening",
+        cause_type="opening",
+        cause_id="OPENING-EUR",
+        lines=[
+            JournalLineDraft(
+                account="Assets:Bank:EUR", debit_minor=100, credit_minor=0, currency="EUR"
+            ),
+            JournalLineDraft(
+                account="Equity:Opening", debit_minor=0, credit_minor=100, currency="EUR"
+            ),
+        ],
+        evidence=[Evidence(event_id=env.ev, role="decision")],
+    )
+    entry = env.policy.execute(PostAction(draft=opening), "bootstrap")
+    assert entry.posted_by == "bootstrap"
+    env.store.append(
+        make_event(
+            "day_boundary",
+            {"date": "2026-10-01", "day_index": 0, "previous_date": None, "month_closed": None},
+            event_time=NOW,
+            source="clock",
+        )
+    )
+    with pytest.raises(PolicyViolation, match="bootstrap_after_start"):
+        env.policy.execute(
+            PostAction(draft=opening.model_copy(update={"cause_id": "OPENING-2"})), "bootstrap"
+        )
+    with pytest.raises(PostRejected) as info:
+        env.ledger.post(opening.model_copy(update={"cause_id": "OPENING-3"}), "bootstrap")
+    assert info.value.reason_code == "out_of_scope" and "day_boundary" in info.value.detail
+    with pytest.raises(PostRejected) as info2:  # the controller posts Equity:Opening only
+        env.ledger.post(opening.model_copy(update={"cause_id": "OPENING-4"}), "controller")
+    assert info2.value.reason_code == "out_of_scope" and "Assets:Bank:EUR" in info2.value.detail

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from core.tax import self_assessed_vat
 from sim.models import AnswerKey, AnswerKeyEntry, Invoice
 from sim.worldgen.cases import CaseRef, CaseRegistry
 from sim.worldgen.messages import MessageRecord
@@ -153,10 +154,9 @@ def checks_for(
         ]
     if case == "T10":
         gr = ref.pos[0].shipments[0].receipt_ids
-        po_value = (
-            sum(b.qty * b.unit_price_minor for b in invs[0].lines and [])
-            if False
-            else invs[0].net_minor
+        # R7 accrues what shipment 0 delivered, at PO price
+        po_value = sum(
+            line.deliveries.get(0, 0) * line.unit_price_minor for line in ref.pos[0].lines
         )
         return [
             {
@@ -226,6 +226,7 @@ def checks_for(
     if case == "A8":
         treatment = ref.extra["treatment"]
         inv = invs[0]
+        self_vat = self_assessed_vat(inv.net_minor)
         if treatment == "domestic":
             return [
                 _journal(ev[0], "Liabilities:AP", credit=inv.gross_minor),
@@ -235,10 +236,14 @@ def checks_for(
         if treatment == "reverse_charge":
             return [
                 _journal(ev[0], "Liabilities:AP", credit=inv.net_minor),
+                _journal(ev[0], "Expenses:VAT:Input", debit=self_vat),
+                _journal(ev[0], "Liabilities:VAT:Output", credit=self_vat),
                 _absent("escalation", refs_contains=num[0]),
             ]
         return [
             _journal(ev[0], "Liabilities:AP", credit=inv.net_minor),
+            _journal(ev[0], "Expenses:VAT:Input", debit=self_vat),
+            _journal(ev[0], "Liabilities:VAT:Output", credit=self_vat),
             _exists("escalation", refs_contains=num[0]),
         ]
     if case == "A9":
@@ -265,18 +270,24 @@ def checks_for(
         return [
             _journal(ev[0], "Liabilities:AP:Retention", credit=inv.retention_minor),
             _journal(ev[0], "Liabilities:AP", credit=inv.gross_minor - inv.retention_minor),
+            {"kind": "payable_status", "inv_id": inv.id, "status": "open"},
             {
                 "kind": "payable_status",
-                "inv_id": inv.id,
-                "status": "open",
+                "inv_id": f"{inv.id}:retention",
+                "status": "held",
                 "retention_minor": inv.retention_minor,
             },
         ]
     if case == "A13":
         return [
             _journal(ev[0], "Liabilities:AP", credit=invs[0].gross_minor),
-            _journal(ev[0], "Assets:Prepayments", credit=ref.extra["prepayment_minor"]),
-            _exists("agent_action", action_type="posted", refs_contains=num[0]),
+            _exists(
+                "agent_action",
+                action_type="posted",
+                refs_contains=num[0],
+                **{"decision.prepayment_minor": ref.extra["prepayment_minor"]},
+            ),
+            _absent("escalation", refs_contains=num[0]),
         ]
     if case == "A14":
         return [_exists("escalation", refs_contains=num[0]), _count(ev[0], 0)]

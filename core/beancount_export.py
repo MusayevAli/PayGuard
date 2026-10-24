@@ -37,7 +37,11 @@ def _tag(text: str) -> str:
 
 
 def render_beancount(entries: Sequence[JournalEntry]) -> str:
-    out: list[str] = ['option "title" "payguard"']
+    out: list[str] = [
+        'option "title" "payguard"',
+        # multi-currency postings carry @@ EUR totals; EUR then needs an explicit tolerance
+        'option "inferred_tolerance_default" "EUR:0.005"',
+    ]
     out.extend(f'option "operating_currency" "{ccy}"' for ccy in OPERATING_CURRENCIES)
     out.append("")
     bank_currency = {acct: ccy for ccy, acct in BANK_ACCOUNT_BY_CURRENCY.items()}

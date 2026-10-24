@@ -74,6 +74,7 @@ class SimClock:
         self._next_boundary = _midnight_on_or_after(self._sim_now)
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
+        self.after_advance: Callable[[list[Event]], None] | None = None
 
     # -- state ----------------------------------------------------------------------------
 
@@ -178,7 +179,23 @@ class SimClock:
                 if result.inserted:
                     inserted.append(result.event)
             self._sim_now = target
+        hook = self.after_advance
+        if hook is not None:
+            hook(inserted)
         return inserted
+
+    def schedule(self, ev: Event) -> None:
+        """Queue a future event (a colleague reply, a scheduled receipt). It is inserted when
+        ``sim_now`` reaches its ``known_at`` like any world event; past-dated events go next."""
+        with self._lock:
+            tail = self._pending[self._cursor :]
+            tail.append(ev)
+            tail.sort(key=lambda e: (e.known_at, e.id))
+            self._pending = self._pending[: self._cursor] + tail
+
+    def pending_events(self) -> list[Event]:
+        with self._lock:
+            return list(self._pending[self._cursor :])
 
     def _emit_boundary(self, inserted: list[Event]) -> None:
         day = self._next_boundary

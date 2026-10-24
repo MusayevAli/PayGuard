@@ -18,7 +18,7 @@ from core.events import EventStore, make_event
 from core.vendors import VendorBankAccount, VendorMaster, account_hash
 
 if TYPE_CHECKING:
-    from core.ledger import JournalEntry, JournalEntryDraft, Ledger
+    from core.ledger import Evidence, JournalEntry, JournalEntryDraft, Ledger
 
 log = structlog.get_logger("policy")
 
@@ -35,15 +35,12 @@ class Scope:
         object.__setattr__(self, "post", frozenset(self.post))
 
     def can_post(self, account: str) -> bool:
-        """``approve`` (the human controller) covers every account; agents match their globs."""
-        if self.approve:
-            return True
         return any(fnmatch.fnmatchcase(account, pattern) for pattern in self.post)
 
 
 PRINCIPALS: dict[str, Scope] = {
     "invoice_agent": Scope(
-        post={"Liabilities:AP*", "Liabilities:GRNI", "Expenses:*"},
+        post={"Liabilities:AP*", "Liabilities:GRNI", "Liabilities:VAT:Output", "Expenses:*"},
         request_payment=False,
         edit_vendor=False,
         edit_allowlist=False,
@@ -57,8 +54,9 @@ PRINCIPALS: dict[str, Scope] = {
         edit_vendor=False,
         edit_allowlist=False,
     ),
-    "controller": Scope(approve=True),
+    "controller": Scope(post={"Equity:Opening"}, approve=True),
     "provisioner": Scope(edit_allowlist=True),
+    "bootstrap": Scope(post={"*"}),  # opening balances only; refused once the clock has started
 }
 
 
@@ -100,6 +98,7 @@ class ReverseAction:
     cause_id: str
     effective_date: date
     posted_at: datetime | None = None
+    extra_evidence: list[Evidence] | None = None
 
 
 @dataclass(frozen=True)
@@ -182,10 +181,22 @@ class Policy:
         self._jumper = jumper_present
         self._now: Callable[[], datetime] = now or (lambda: datetime.now(UTC))
 
+    @property
+    def ledger(self) -> Ledger:
+        return self._ledger
+
     # ---------------------------------------------------------------- dispatch
 
     def execute(self, action: Action, principal: str) -> Any:
         scope = PRINCIPALS.get(principal)
+        if principal == "bootstrap" and self._events.has_type("day_boundary"):
+            self._violation(
+                principal,
+                action,
+                "bootstrap_after_start",
+                "the bootstrap principal may only act before the clock starts (a day_boundary exists)",
+                refs=[],
+            )
         if scope is None:
             self._violation(
                 principal,
@@ -235,6 +246,15 @@ class Policy:
         try:
             return self._ledger.post(action.draft, principal, posted_at=action.posted_at)
         except PostRejected as exc:
+            if exc.reason_code == "duplicate":
+                log.info(
+                    "post_duplicate",
+                    principal=principal,
+                    existing_entry_id=exc.existing_entry_id,
+                    event_id=None,
+                    rule_id=None,
+                )
+                raise
             self._log_post_rejected(
                 principal,
                 exc.reason_code,
@@ -262,6 +282,7 @@ class Policy:
                 action.cause_id,
                 action.effective_date,
                 posted_at=action.posted_at,
+                extra_evidence=action.extra_evidence,
             )
         except PostRejected as exc:
             self._log_post_rejected(

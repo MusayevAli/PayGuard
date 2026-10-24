@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from decimal import ROUND_HALF_EVEN, Decimal
 
+from core.tax import ENTITY_VAT_RATE_BP, treatment_for_country
 from sim.models import (
     BankDetails,
     GoodsReceipt,
@@ -23,7 +24,7 @@ from sim.models import (
     Uom,
     VatTreatment,
 )
-from sim.worldgen.catalog import PLANTS, VAT_RATE_BP, PlantInfo
+from sim.worldgen.catalog import PLANTS, PlantInfo
 from sim.worldgen.plan import (
     END,
     AdHocSupplier,
@@ -285,13 +286,14 @@ def vat_for(
     language: Language,
     override_bp: int | None,
 ) -> tuple[int, VatTreatment, str | None]:
+    """Entity-based VAT (spec §2.1): DE suppliers domestic 19 %, other EU reverse charge, JP/US import."""
     if override_bp is not None:
         return override_bp, "wrongly_charged", None
-    country = supplier.country
-    if country in ("JP", "US"):
+    treatment = treatment_for_country(supplier.country)
+    if treatment == "import":
         return 0, "export", EXPORT_NOTE[language]
-    if country == plant.country:
-        return VAT_RATE_BP[country], "domestic", None
+    if treatment == "domestic":
+        return ENTITY_VAT_RATE_BP, "domestic", None
     return 0, "reverse_charge", REVERSE_CHARGE_NOTE[language]
 
 

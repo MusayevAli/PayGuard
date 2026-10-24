@@ -135,3 +135,66 @@ Choices the spec left open, with the reasoning. Newest at the bottom of each par
     by `auto_expiry`. `escalation.options` carries option ids; labels live in the packet record.
 39. **New action type** `policy_violation` was added to the §5.1 `agent_action` enum for refusals that
     are not postings (scope, invariants, jumper).
+
+## Part 3 — runner, LLM boundary, invoice agent, scoreboard
+
+40. **Bootstrap principal; controller narrowed (Part 2 review).** `bootstrap: Scope(post={"*"})` posts
+    opening balances and is refused (`policy_violation bootstrap_after_start`, ledger
+    `PostRejected(out_of_scope)`) once any `day_boundary` exists. `controller` posts only `Equity:Opening`
+    besides close/reopen; `Scope.can_post` is glob-only (`approve` no longer grants posting).
+    `PostRejected(duplicate)` is a successful no-op inside `Context.act`: the existing entry is returned
+    and no `post_rejected` event is written (replays leave no trace).
+41. **Entity tax facts.** `core/tax.py` holds the entity (Toyota Boshoku Europe GmbH, DE, 19 %). The
+    Part 1 world applied plant-country VAT; it was regenerated with entity-based treatment (DE domestic,
+    CZ/PL/AT reverse charge with self-assessment, JP/US import). Self-assessment credits
+    `Liabilities:VAT:Output`, so that account was added to the invoice agent's scope in spec §8.
+42. **Reference price is the agreed PO line price** (amendments included); the price list valid at the
+    invoice date is consulted only to detect the M3 gap. Reasons: the generator prices POs from the list
+    valid on the order date, renegotiated amendments (M4) change the agreed price, the old-quarter
+    mismatch (A9) and T2 are variances against the PO, a merged vendor's PO carries its own list, and the
+    T8 order would otherwise be held. `variance_bp` rounds up so a variance is never understated.
+43. **R7 is one auto-reversing accrual per purchase order** (answer key T10): every line received by the
+    last day of the month and not yet invoiced is accrued at PO price in one entry whose evidence is the
+    receipt events and the PO; the first invoice for the PO reverses the whole entry (`reverse()` with the
+    invoice as extra evidence, `ReverseAction.extra_evidence`), and the next month end re-accrues whatever
+    is still open. The invoice agent runs R7 on the `day_boundary` that closes a month, before any close.
+44. **Retention is read from the document** (R15): a retention/holdback clause in the notes or payment
+    terms (printed percentage, else 10 %) splits the credit into `Liabilities:AP` and
+    `Liabilities:AP:Retention` with two payables (`<inv>` open, `<inv>:retention` held, reason
+    `retention…`); `ap_control_reconciles` counts the retention payables. Tooling without a clause (A13)
+    is not retained.
+45. **Waits.** A colleague query opens a wait keyed to the PO line with `deadline = now + 48 h`; replies
+    are attached (`record_reply`) but the wait stays open until the invoice posts, is held or expires, so
+    "nothing received yet" does not re-ask and the deadline still escalates on the day boundary. Reply
+    facts travel as `refs` tokens from `sim/people.py` (`GR-…`, `qty:`, `uom:`, `confirmed`, `reassign`,
+    `unit_corrected`, `nothing_received`, `po:`); prose is never parsed.
+46. **Runner.** Events the runner writes about an agent's failure (`agent_action{error}`, `system_error`)
+    are marked handled for every agent, so an exploding agent cannot loop on its own error events;
+    `drain()` runs to a fixpoint and is attached to `clock.after_advance`.
+47. **LLM boundary.** Default model `claude-opus-5` (USD 5 / 25 per MTok, cache read 0.1×, write 1.25×);
+    `temperature=0` only for models that accept it, otherwise `output_config.effort`; tool use with
+    `tool_choice={"type": "auto", "disable_parallel_tool_use": true}` plus a strict schema because
+    Fable 5.1 rejects forced tool choice; prompt caching on the system block; results cached by SHA-256.
+    No Anthropic credentials exist on the development machine, so the API-backed tests fail with a
+    message (never skip) and `tests/truth_llm.py` provides a truth-backed extractor for the offline twin
+    (`test_invoice_agent_world_offline.py`); spec §12 allows the truth under tests.
+48. **World changes in Part 3.** Besides the VAT regeneration: the T8 order is priced from Kovak's list
+    with quantities solving exactly EUR 2,100,000.00 (50,096 / 50,095 / 29,205); the gap supplier's
+    ordinary invoices become known from 21 Oct so only the planted M3 invoice is dated in the 1–14 Oct
+    gap; the answer key derives the T10 accrual from the PO plan and checks A8 self-assessment, A12 two
+    payables and A13 `decision.prepayment_minor`. `vendor_message.channel` gained `invoice` for printed
+    bank details forwarded to the vendor agent.
+49. **Prepayment netting (A13) is Part 4.** `Assets:Prepayments` is outside every agent's posting scope,
+    so the invoice agent posts the full invoice and records `prepayment_minor` on the decision; the
+    payment agent nets it.
+50. **Scoreboard semantics.** A case is pending until every injected event has been handled by some
+    agent; a hold, duplicate rejection or escalation is a false positive when its invoice ids (its refs
+    when it names no invoice) intersect no case. T9 shows `missed` until the payment agent exists.
+51. **Vendor resolution order:** VAT id, exact legal name, normalised name (§6), name variants; the
+    original record is kept (`original_id`) and `merged_into` gives the canonical vendor for posting.
+52. **People.** Jonas Weber answers every receipt question; the PO's purchasing contact answers freight
+    confirmations and "which PO" questions.
+53. **R4 needs the same supply.** Two invoices of one vendor with totals within 50 bp and dates within
+    3 days are *not* duplicates when they name different purchase orders or bill disjoint SKUs (the
+    world has such coincidences); the spec's three tests remain necessary, this adds a sufficient
+    "same supply" condition. A15 (±0.3 % total, same PO) is still rejected.
