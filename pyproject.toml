@@ -16,6 +16,8 @@ dependencies = [
     "pypdfium2>=4.30",
     "numpy>=2.0",
     "certifi>=2024.7",
+    "beancount>=3.0",
+    "fava>=1.30",
 ]
 
 [dependency-groups]

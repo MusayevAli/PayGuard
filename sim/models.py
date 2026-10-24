@@ -329,6 +329,7 @@ ActionType = Literal[
     "account_restored",
     "payment_run_built",
     "payment_held",
+    "policy_violation",
     "error",
 ]
 

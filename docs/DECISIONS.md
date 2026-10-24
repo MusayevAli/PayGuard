@@ -66,8 +66,9 @@ Choices the spec left open, with the reasoning. Newest at the bottom of each par
     with `make fonts` after adding Japanese strings. A unit test checks glyph coverage.
 21. **Answer-key `where` semantics**: plain keys match payload fields; `*_contains` means substring
     or list membership; `*_contains_all` requires every listed value. Account names assumed for
-    Part 2: `Liabilities:AP`, `Liabilities:AP:Retention`, `Liabilities:GRNI`, `Assets:VAT:Input`,
-    `Assets:Prepayments`, `Expenses:Freight`, `Expenses:FX:Rounding`.
+    Part 2: `Liabilities:AP`, `Liabilities:AP:Retention`, `Liabilities:GRNI`, `Expenses:VAT:Input`,
+    `Assets:Prepayments`, `Expenses:Freight`, `Expenses:FX:Rounding` (all in the §2.1 chart; the key originally
+    said `Assets:VAT:Input` and was regenerated in Part 2 when the chart was fixed).
 22. **Receipt and invoice numbering.** GR ids are chronological with `GR-4471` anchored to T1's
     receipt; invoice numbers are per-supplier sequences anchored so that the spec's fixed numbers
     (KT-2291, KT-2270, FT-118, GF-77, LB-301, HM-09) fall in place; GF-77A and CN-12 are fixed.
@@ -78,3 +79,59 @@ Choices the spec left open, with the reasoning. Newest at the bottom of each par
 25. **`make world` wipes the output directory first** so stale documents cannot survive a regeneration.
 26. **mypy scope** is `core/` and `sim/models.py` as instructed (pydantic plugin, strict); the rest
     of `sim/` and `api/` is typed but only ruff-checked in Part 1.
+
+## Part 2 — money, ledger, policy, packets
+
+27. **Chart of accounts** lives in spec §2.1 and `core/accounts.py`; posting to any other name is
+    `PostRejected(unknown_account)`. The Part 1 answer-key generator referenced `Assets:VAT:Input`; it now
+    emits `Expenses:VAT:Input` and the world was regenerated (`world.jsonl` unchanged, `answer_key.json`
+    updated). Supplier categories map to `Expenses:Materials:*`, `Expenses:Tooling`, `Expenses:Freight`.
+28. **`parse_locale_amount`, `convert`, `allocate`.** `convert` goes through EUR (ECB rates are units per
+    EUR), rounds ROUND_HALF_EVEN into the target currency's minor unit and returns the rate and date used;
+    a missing date or currency raises `FxRateUnavailable`. `allocate` uses the largest-remainder method
+    with ties broken by position, so splits always sum exactly and are deterministic.
+29. **Check (2) and multi-currency entries.** "Per currency, Σdebit = Σcredit" is enforced exactly for
+    single-currency entries. A multi-currency entry (an FX conversion, a EUR-funded CZK settlement) cannot
+    balance per currency by definition, so it is governed by check (3): EUR equivalents must agree within
+    ±1 cent and the residual is posted to `Expenses:FX:Rounding` on the same entry. `unknown_account` is
+    raised during check (1) (line validation). A missing FX rate surfaces as `unbalanced_eur`.
+30. **Controller posting scope.** The spec's `controller: Scope(approve=True)` has no `post` globs.
+    `approve` grants posting to every account: the controller is the human with final say and must be
+    able to post opening balances and reversals. `Scope.post` accepts set literals (the table is verbatim)
+    and normalises to a frozenset.
+31. **Duplicates raise.** Check (7) raises `PostRejected(duplicate)` carrying `existing_entry_id`; callers
+    that replay can treat it as success. Nothing is written twice.
+32. **Evidence must exist.** When the ledger is attached to an event store, every evidence event id must
+    exist there (`no_evidence` otherwise). The bootstrap's evidence is its own `controller_decision`
+    event (`BOOTSTRAP-OPENING`).
+33. **`posted_at` is sim time.** The ledger takes a `now()` callable (the clock in later parts) and
+    `post()` accepts `posted_at`; `balance(..., as_of_known_at)` answers "what did we believe at X".
+34. **Periods.** `close_period` needs `approve` scope and `ap_control_reconciles()` (Σ open payables
+    with status open/scheduled/held equals the `Liabilities:AP` credit balance per currency, and Σ
+    payable retention equals `Liabilities:AP:Retention`). R7 accruals are the invoice agent's job in
+    Part 3 and run before the close. Reopening requires a `controller_decision` event with
+    `decision="reopen_period"` naming the month, is never exposed through the API, and is recorded in a
+    `period_log` table (an addition; the four spec tables are unchanged). A `payables` table per §5.4
+    and a `requested_by` column on `vendor_bank_accounts` (needed for §8's requester ≠ approver check)
+    are the only other schema additions.
+35. **Beancount export** annotates every non-EUR posting with `@@ <abs EUR equivalent> EUR`, opens all
+    chart accounts on 2026-01-01 (bank accounts constrained to their currency), uses the entry id as a
+    link (`^JE-000001`) and the cause type as a tag, and is written via temp file + `os.replace`. The
+    ledger title option is `payguard`, so Fava serves it at `/payguard/`.
+36. **Opening balances** are dated 2026-09-30 and valued for EUR equivalence at the first published
+    rate of the window (2026-10-01), recorded as the lines' `rate_date`; the converter itself never
+    falls back. The legacy Katowice Metal Forming invoices (KMF/2026/09/0412, 0413, 0417; EUR 62,480.00,
+    71,150.12 and 53,800.00) are posted against `Equity:Opening` with open payables due 30 days after
+    their September dates, so Part 4 reconciles `PAY-BATCH-0001` (EUR 187,430.12) instead of paying again.
+    The bank generator now imports the §2.7 opening balances from `core/bootstrap.py` (single source).
+37. **Vendor master seeding.** The bootstrap loads the 40 suppliers as vendors with one active, approved
+    account each (`requested_via=onboarding`, `verified_via=contract`, approved by the controller, hold
+    already elapsed, `on_chip=False` until Part 7 provisions). The duplicate record V-0033 is stored with
+    `status=merged`, `merged_into=V-0007` (same VAT ID, later onboarding), which is how the agents resolve
+    M1.
+38. **Packets.** Packet ids derive from the draft's content hash, so a replayed `create_packet` returns
+    the existing packet without a second `escalation` event. `decide_packet` records the first decision
+    only; later calls return it unchanged. Expiry applies the safe no-op `hold` as a `controller_decision`
+    by `auto_expiry`. `escalation.options` carries option ids; labels live in the packet record.
+39. **New action type** `policy_violation` was added to the §5.1 `agent_action` enum for refusals that
+    are not postings (scope, invariants, jumper).

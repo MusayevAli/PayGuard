@@ -9,12 +9,11 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import ROUND_HALF_EVEN, Decimal
 
+from core.bootstrap import OPENING_BANK_MINOR as OPENING_MINOR
 from sim.fx import FxTable, rate_for
 from sim.mt940 import Statement, StatementLine, truncate_remittance
 from sim.worldgen.catalog import BANK_ACCOUNTS
 from sim.worldgen.plan import END, START
-
-OPENING_MINOR = {"EUR": 196_200_000, "CZK": 840_000_000, "PLN": 210_000_000}
 
 
 @dataclass(frozen=True)
