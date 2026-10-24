@@ -11,7 +11,8 @@ the company, its suppliers, bank, documents and people.
 | Part | Scope | State |
 |---|---|---|
 | 1 | World generator, append-only event store, simulation clock, streaming API | done |
-| 2–8 | Ledger, agents, signer, bank, people, UI, hardware, rehearsal | not started |
+| 2 | Money/FX, chart of accounts, append-only ledger, policy, packets, bootstrap, Beancount + Fava | done |
+| 3–8 | Agents, signer, bank, people, UI, hardware, rehearsal | not started |
 
 ## Running the simulation
 
@@ -70,6 +71,38 @@ Everything under `sim/` derives from `--seed`: suppliers, orders, documents (Rep
 mode, seeded noise for scans, fixed MIME boundaries), statements and the answer key. Two runs with the
 same seed produce byte-identical output directories. The only external input is the ECB rate file,
 which is pinned to a fixed historical window and cached.
+
+## Ledger
+
+`core/ledger.py` is an append-only double-entry ledger in the same SQLite file as the event store
+(`payguard.db` by default). Amounts are integer minor units; every non-EUR line carries the ECB rate
+and date used for its EUR equivalent (`core/money.py: convert`). `post(entry, principal)` enforces
+spec §5.2 in order: one side per line and a known account (chart in spec §2.1, `core/accounts.py`),
+per-currency balance, EUR balance within ±1 cent with the residual posted to `Expenses:FX:Rounding`,
+open period, principal scope (spec §8), at least one evidence event that exists in the event store,
+and no duplicate content hash. Any failure raises `PostRejected(reason_code, detail)`.
+
+`core/policy.py` is the single side-effect path for agents (`Policy.execute(action, principal)`);
+refusals are logged as `agent_action{post_rejected | policy_violation}` events. It also enforces the
+vendor bank-account invariants of spec §5.3 (one active account, verification over a different channel,
+72 h hold, approval by someone other than the requester, `on_chip` only by the provisioner with the
+jumper present, `PAYGUARD_JUMPER=1`).
+
+`core/packets.py` stores escalation packets and records controller decisions idempotently;
+`core/bootstrap.py` posts the opening balances (spec §2.7) and the legacy AP that the 2 October batch
+payment settles, and seeds the vendor master from the generated suppliers.
+
+### Beancount and Fava
+
+The ledger rewrites `ledger/payguard.beancount` atomically after every post. Non-EUR postings carry
+`@@ <EUR equivalent> EUR`, so Beancount balances each transaction exactly as the ledger does.
+
+```bash
+uv run bean-check ledger/payguard.beancount   # zero output means zero errors
+make fava                                      # http://127.0.0.1:5000 (ledger slug: payguard)
+```
+
+Fava watches the file, so it refreshes as the ledger posts.
 
 ## Layout
 
