@@ -6,10 +6,16 @@ explicit rounding mode; ``float`` never touches money.
 
 from __future__ import annotations
 
+import os
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
-from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation
+from datetime import date
+from decimal import ROUND_FLOOR, ROUND_HALF_EVEN, Decimal, InvalidOperation
+from pathlib import Path
 from typing import Final, Literal
+
+from sim.fx import FxTable, load_fx_rates
 
 MINOR_DIGITS: Final[dict[str, int]] = {"EUR": 2, "CZK": 2, "PLN": 2, "USD": 2, "JPY": 0}
 
@@ -236,3 +242,107 @@ def decimal_or_none(text: str) -> Decimal | None:
     except InvalidOperation:
         return None
     return d if d.is_finite() else None
+
+
+# ---------------------------------------------------------------------------------------
+# FX conversion (ECB reference rates, EUR base) and proportional allocation
+# ---------------------------------------------------------------------------------------
+
+
+class FxRateUnavailable(ValueError):
+    """No rate for the requested currency/date; nothing is ever guessed."""
+
+
+@dataclass(frozen=True, slots=True)
+class Conversion:
+    money: Money
+    rate: Decimal
+    """Target units per one source unit, exact before rounding."""
+    rate_date: date
+    from_rate: Decimal | None
+    """ECB units of the source currency per EUR (None when the source is EUR)."""
+    to_rate: Decimal | None
+    """ECB units of the target currency per EUR (None when the target is EUR)."""
+
+
+_DEFAULT_TABLES: dict[str, FxTable] = {}
+
+
+def default_fx_table() -> FxTable:
+    """The FX table at ``$PAYGUARD_FX_RATES`` or ``sim/world/fx_rates.json`` (cached per path)."""
+    path = Path(os.environ.get("PAYGUARD_FX_RATES", "sim/world/fx_rates.json"))
+    key = str(path.resolve())
+    if key not in _DEFAULT_TABLES:
+        if not path.is_file():
+            raise FxRateUnavailable(
+                f"no FX table at {path}; run `make world` or point PAYGUARD_FX_RATES at an fx_rates.json"
+            )
+        _DEFAULT_TABLES[key] = load_fx_rates(path)
+    return _DEFAULT_TABLES[key]
+
+
+def _ecb_rate(table: FxTable, currency: str, on: date) -> Decimal | None:
+    if currency == table.base:
+        return None
+    day = table.rates.get(on.isoformat())
+    if day is None:
+        raise FxRateUnavailable(
+            f"no ECB rates for {on.isoformat()} (table covers {min(table.rates)}..{max(table.rates)})"
+        )
+    try:
+        return Decimal(day.rates[currency])
+    except KeyError as exc:
+        raise FxRateUnavailable(f"no ECB rate for {currency} on {on.isoformat()}") from exc
+
+
+def convert(
+    money: Money, to_currency: str, rate_date: date, rates: FxTable | None = None
+) -> Conversion:
+    """Convert at the ECB reference rate of ``rate_date`` (EUR base) with ROUND_HALF_EVEN.
+
+    Cross rates go through EUR. The returned ``Conversion`` carries the rate and date used so a
+    journal line can record them (spec §4).
+    """
+    minor_digits(to_currency)
+    if money.currency == to_currency:
+        return Conversion(
+            money=money, rate=Decimal(1), rate_date=rate_date, from_rate=None, to_rate=None
+        )
+    table = rates if rates is not None else default_fx_table()
+    from_rate = _ecb_rate(table, money.currency, rate_date)
+    to_rate = _ecb_rate(table, to_currency, rate_date)
+    multiplier = Decimal(1)
+    if from_rate is not None:
+        multiplier = multiplier / from_rate
+    if to_rate is not None:
+        multiplier = multiplier * to_rate
+    source_major = Decimal(money.minor).scaleb(-money.minor_digits)
+    target = Money.from_decimal(source_major * multiplier, to_currency, rounding=ROUND_HALF_EVEN)
+    return Conversion(
+        money=target, rate=multiplier, rate_date=rate_date, from_rate=from_rate, to_rate=to_rate
+    )
+
+
+def allocate(money: Money, weights: Sequence[int | Decimal]) -> list[Money]:
+    """Split ``money`` proportionally to ``weights`` so the parts sum exactly to the total.
+
+    Largest-remainder method: floors first, then one minor unit to the parts with the largest
+    fractional remainder, ties broken by position. Zero weights receive zero.
+    """
+    if not weights:
+        raise ValueError("allocate needs at least one weight")
+    ws = [Decimal(w) for w in weights]
+    if any(w < 0 for w in ws):
+        raise ValueError("weights must be non-negative")
+    total = sum(ws, Decimal(0))
+    if total <= 0:
+        raise ValueError("weights must sum to a positive number")
+    sign = -1 if money.minor < 0 else 1
+    amount = Decimal(abs(money.minor))
+    exact = [amount * w / total for w in ws]
+    floors = [int(e.to_integral_value(rounding=ROUND_FLOOR)) for e in exact]
+    remainder = abs(money.minor) - sum(floors)
+    order = sorted(range(len(ws)), key=lambda i: (-(exact[i] - floors[i]), i))
+    for i in order[:remainder]:
+        floors[i] += 1
+    return [Money(sign * part, money.currency) for part in floors]

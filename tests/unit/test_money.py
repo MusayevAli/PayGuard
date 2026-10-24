@@ -114,3 +114,120 @@ def test_parse_locale_amount_ambiguous_or_invalid_returns_none(
     text: str, currency: str, hint
 ) -> None:
     assert parse_locale_amount(text, currency, hint) is None
+
+
+# ---------------------------------------------------------------------------------------
+# Part 2: convert() and allocate()
+# ---------------------------------------------------------------------------------------
+
+from datetime import date  # noqa: E402
+
+from core.money import FxRateUnavailable, allocate, convert  # noqa: E402
+from sim.fx import write_fx_rates  # noqa: E402
+from tests.conftest import synthetic_fx  # noqa: E402
+
+
+def test_convert_uses_the_requested_date_and_direction() -> None:
+    fx = synthetic_fx()
+    r = convert(Money(243450, "CZK"), "EUR", date(2026, 10, 1), fx)
+    assert r.money == Money(10000, "EUR")
+    assert r.rate_date == date(2026, 10, 1)
+    assert r.from_rate == Decimal("24.3450") and r.to_rate is None
+    assert r.rate == Decimal(1) / Decimal("24.3450")
+    r2 = convert(Money(243450, "CZK"), "EUR", date(2026, 10, 2), fx)
+    assert r2.money == Money(9937, "EUR")  # 2434.50 / 24.5 = 99.3673...
+    assert convert(Money(10000, "EUR"), "CZK", date(2026, 10, 1), fx).money == Money(243450, "CZK")
+    cross = convert(Money(243450, "CZK"), "PLN", date(2026, 10, 1), fx)
+    assert cross.money == Money(42680, "PLN")
+    assert cross.from_rate == Decimal("24.3450") and cross.to_rate == Decimal("4.2680")
+    same = convert(Money(5, "EUR"), "EUR", date(2026, 10, 1), fx)
+    assert same.money == Money(5, "EUR") and same.rate == Decimal(1) and same.from_rate is None
+
+
+def test_convert_rounds_half_even() -> None:
+    fx = synthetic_fx()  # 3 Oct: 4 CZK per EUR
+    assert convert(Money(10, "CZK"), "EUR", date(2026, 10, 3), fx).money == Money(
+        2, "EUR"
+    )  # 2.5 -> 2
+    assert convert(Money(30, "CZK"), "EUR", date(2026, 10, 3), fx).money == Money(
+        8, "EUR"
+    )  # 7.5 -> 8
+    assert convert(Money(50, "CZK"), "EUR", date(2026, 10, 3), fx).money == Money(
+        12, "EUR"
+    )  # 12.5 -> 12
+
+
+def test_convert_jpy_has_no_minor_unit() -> None:
+    fx = synthetic_fx()
+    assert convert(Money(10000, "EUR"), "JPY", date(2026, 10, 1), fx).money == Money(16230, "JPY")
+    assert convert(Money(1, "JPY"), "EUR", date(2026, 10, 1), fx).money == Money(1, "EUR")
+    assert convert(Money(0, "JPY"), "EUR", date(2026, 10, 1), fx).money == Money(0, "EUR")
+
+
+def test_convert_missing_date_or_rate_raises_instead_of_guessing() -> None:
+    fx = synthetic_fx()
+    with pytest.raises(FxRateUnavailable, match="2026-12-01"):
+        convert(Money(1, "CZK"), "EUR", date(2026, 12, 1), fx)
+    with pytest.raises(FxRateUnavailable, match="USD"):
+        convert(Money(1, "CZK"), "USD", date(2026, 10, 9), fx)  # no USD that day
+    with pytest.raises(FxRateUnavailable, match="2026-10-04"):
+        convert(Money(1, "EUR"), "CZK", date(2026, 10, 4), fx)  # day absent from the table
+
+
+def test_convert_default_table_comes_from_env_or_world(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "fx_rates.json"
+    write_fx_rates(synthetic_fx(), path)
+    monkeypatch.setenv("PAYGUARD_FX_RATES", str(path))
+    assert convert(Money(243450, "CZK"), "EUR", date(2026, 10, 1)).money == Money(10000, "EUR")
+    monkeypatch.setenv("PAYGUARD_FX_RATES", str(tmp_path / "missing.json"))
+    with pytest.raises(FxRateUnavailable, match=r"missing\.json"):
+        convert(Money(1, "CZK"), "EUR", date(2026, 10, 1))
+
+
+def test_allocate_largest_remainder_is_exact_and_deterministic() -> None:
+    assert allocate(Money(100, "EUR"), [1, 1, 1]) == [
+        Money(34, "EUR"),
+        Money(33, "EUR"),
+        Money(33, "EUR"),
+    ]
+    assert allocate(Money(1000, "EUR"), [90, 10]) == [Money(900, "EUR"), Money(100, "EUR")]
+    assert allocate(Money(-1000, "EUR"), [90, 10]) == [Money(-900, "EUR"), Money(-100, "EUR")]
+    assert allocate(Money(5, "EUR"), [1, 2, 3]) == [
+        Money(1, "EUR"),
+        Money(2, "EUR"),
+        Money(2, "EUR"),
+    ]
+    assert allocate(Money(1, "EUR"), [1, 1]) == [
+        Money(1, "EUR"),
+        Money(0, "EUR"),
+    ]  # tie -> earlier index
+    assert allocate(Money(7, "JPY"), [0, 1]) == [Money(0, "JPY"), Money(7, "JPY")]
+    assert allocate(Money(0, "CZK"), [3, 5]) == [Money(0, "CZK"), Money(0, "CZK")]
+    assert allocate(Money(1000, "EUR"), [Decimal("0.9"), Decimal("0.1")]) == [
+        Money(900, "EUR"),
+        Money(100, "EUR"),
+    ]
+
+
+def test_allocate_random_splits_sum_exactly() -> None:
+    import random
+
+    rng = random.Random(2026)
+    for _ in range(50):
+        total = rng.randrange(-5_000_000, 5_000_000)
+        n = rng.randrange(1, 9)
+        weights = [rng.randrange(0, 1000) for _ in range(n)]
+        if sum(weights) == 0:
+            weights[0] = 1
+        parts = allocate(Money(total, "CZK"), weights)
+        assert len(parts) == n
+        assert sum(p.minor for p in parts) == total
+        assert all(p.currency == "CZK" for p in parts)
+        assert all(p.minor == 0 for p, w in zip(parts, weights, strict=True) if w == 0)
+        assert allocate(Money(total, "CZK"), weights) == parts
+
+
+def test_allocate_rejects_bad_weights() -> None:
+    for bad in ([], [0, 0], [-1, 2]):
+        with pytest.raises(ValueError):
+            allocate(Money(10, "EUR"), bad)

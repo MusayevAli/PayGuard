@@ -51,6 +51,18 @@ What's real: agents, rules, ledger, hardware, the attack class. What's simulated
 
 Toyota Boshoku Europe, simulated supplier operations. Plants: Munich (DE), Liberec (CZ), Gliwice (PL). Functional currency EUR; local bank accounts in EUR, CZK, PLN. Fiscal month = calendar month. Timeline: 2026-10-01 to 2026-11-15, so one month-end close (31 Oct) occurs mid-demo.
 
+Chart of accounts (`core/accounts.py`; posting to any other account is rejected):
+
+```
+Assets:Bank:EUR  Assets:Bank:CZK  Assets:Bank:PLN
+Assets:Prepayments
+Liabilities:AP  Liabilities:AP:Retention  Liabilities:GRNI  Liabilities:VAT:Output
+Expenses:Materials:Frames  Expenses:Materials:Foam  Expenses:Materials:Trim
+Expenses:Materials:Mechanisms  Expenses:Materials:Harness  Expenses:Materials:Fasteners
+Expenses:Tooling  Expenses:Freight  Expenses:VAT:Input  Expenses:Bank:Fees  Expenses:FX:Rounding  Expenses:FX:Realized
+Equity:Opening
+```
+
 ### 2.2 Suppliers (40)
 
 Fields: `id`, `legal_name`, `name_variants[]` (3–5 realistic spellings), `country`, `currency`, `vat_id` (valid format: DE USt-IdNr, CZ DIČ, PL NIP; validated with `python-stdnum`), `iban` (valid mod-97, generated with `schwifty`; JP/US use local account formats), `terms` (`net30`, `net45`, `2/10 net30`), `purchasing_contact` (internal person), `onboarded_at`, `invoice_template_id`, `language` (cs/pl/de/en/ja), `number_locale` (`1.234,56` / `1 234,56` / `1,234.56`), `date_format` (`DD.MM.YYYY`, `YYYY-MM-DD`, `MM/DD/YYYY`).
