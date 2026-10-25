@@ -291,3 +291,4 @@ headline scoreboard at 10/10.
 
 See `spec/PAYGUARD_SPEC.md` §3. Decisions the spec left open are recorded in `docs/DECISIONS.md`;
 per-part plans live in `docs/plans/`.
+# PayGuard
