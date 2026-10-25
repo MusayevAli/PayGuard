@@ -186,7 +186,70 @@ CREATE TABLE IF NOT EXISTS llm_calls (id INTEGER PRIMARY KEY AUTOINCREMENT, crea
 
 
 class LLMUnavailable(RuntimeError):
-    """No credentials or the API cannot be reached; the caller decides how to hold the work."""
+    """No credentials, the API cannot be reached, or the spend cap is hit; the caller decides how
+    to hold the work."""
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+SPEND_SCHEMA = """
+CREATE TABLE IF NOT EXISTS spend (id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT, model TEXT, purpose TEXT, cost_usd TEXT, request_id TEXT NULL);
+"""
+
+
+def load_dotenv(path: Path | None = None) -> dict[str, str]:
+    """Read ``KEY=VALUE`` lines from ``.env`` at the repo root (or ``PAYGUARD_ENV_FILE``) into the
+    environment without overriding variables that are already set. Returns what was loaded. The key
+    never has to pass through a shell history or a chat window this way."""
+    target = path or Path(os.environ.get("PAYGUARD_ENV_FILE") or REPO_ROOT / ".env")
+    loaded: dict[str, str] = {}
+    if not target.is_file():
+        return loaded
+    for raw in target.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :]
+        key, _, value = line.partition("=")
+        key, value = key.strip(), value.strip().strip("'\"")
+        if key and key not in os.environ:
+            os.environ[key] = value
+            loaded[key] = value
+    return loaded
+
+
+class SpendLedger:
+    """Every priced call across every run on this machine, so ``PAYGUARD_MAX_USD`` is a budget for
+    the key, not for one database."""
+
+    def __init__(self, path: str | Path) -> None:
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.RLock()
+        self._con = sqlite3.connect(
+            str(p), timeout=30.0, check_same_thread=False, isolation_level=None
+        )
+        self._con.row_factory = sqlite3.Row
+        self._con.execute("PRAGMA journal_mode=WAL")
+        self._con.executescript(SPEND_SCHEMA)
+
+    def close(self) -> None:
+        with self._lock:
+            self._con.close()
+
+    def add(
+        self, when: datetime, model: str, purpose: str, cost: Decimal, request_id: str | None
+    ) -> None:
+        with self._lock:
+            self._con.execute(
+                "INSERT INTO spend(created_at, model, purpose, cost_usd, request_id) VALUES (?,?,?,?,?)",
+                (when.isoformat(), model, purpose, str(cost), request_id),
+            )
+
+    def total(self) -> Decimal:
+        with self._lock:
+            rows = self._con.execute("SELECT cost_usd FROM spend").fetchall()
+        return sum((Decimal(r["cost_usd"]) for r in rows), Decimal(0))
 
 
 class UsageReport(BaseModel):
@@ -310,9 +373,19 @@ class LLMClient:
         concurrency: int = 4,
         now: Callable[[], datetime] | None = None,
         timeout: float = 120.0,
+        max_usd: Decimal | str | None = None,
+        spend_db: str | Path | None = None,
     ) -> None:
+        load_dotenv()
         self.model = model or os.environ.get("PAYGUARD_MODEL", DEFAULT_MODEL)
         self.text_model = text_model or os.environ.get("PAYGUARD_MODEL_TEXT", self.model)
+        cap = os.environ.get("PAYGUARD_MAX_USD") if max_usd is None else max_usd
+        self.max_usd: Decimal | None = Decimal(str(cap)) if cap not in (None, "") else None
+        self._spend = SpendLedger(
+            spend_db
+            or os.environ.get("PAYGUARD_SPEND_DB")
+            or REPO_ROOT / ".cache" / "payguard_spend.db"
+        )
         self._client = client
         self._async_client = async_client
         self._concurrency = concurrency
@@ -329,11 +402,28 @@ class LLMClient:
     def close(self) -> None:
         with self._lock:
             self._con.close()
+        self._spend.close()
+
+    # ------------------------------------------------------------------ spend cap
+
+    def spent_usd(self) -> Decimal:
+        """What this machine has spent through the key, across all runs and caches."""
+        return self._spend.total()
+
+    def _check_cap(self) -> None:
+        if self.max_usd is None:
+            return
+        spent = self._spend.total()
+        if spent >= self.max_usd:
+            raise LLMUnavailable(
+                f"spend cap reached: USD {spent} of PAYGUARD_MAX_USD={self.max_usd}; no call made"
+            )
 
     # ------------------------------------------------------------------ credentials
 
     @staticmethod
     def credentials_available() -> bool:
+        load_dotenv()
         if os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"):
             return True
         profile_dir = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "anthropic"
@@ -389,6 +479,8 @@ class LLMClient:
         cr = int(getattr(usage, "cache_read_input_tokens", 0) or 0)
         cost = call_cost(model, inp, out, cw, cr)
         request_id = getattr(response, "_request_id", None)
+        if cost is not None:
+            self._spend.add(self._now(), model, purpose, cost, request_id)
         with self._lock:
             self._con.execute(
                 "INSERT INTO llm_calls(created_at, purpose, model, sha256, input_tokens, output_tokens, cache_write_tokens, cache_read_tokens, latency_ms, cost_usd, request_id, status)"
@@ -561,6 +653,7 @@ class LLMClient:
             reason="no attempt", errors=[]
         )
         for attempt in range(2):
+            self._check_cap()
             started = time.perf_counter()
             try:
                 response = client.messages.create(**self._extract_request(doc, feedback))
@@ -594,6 +687,7 @@ class LLMClient:
             raise LLMUnavailable(
                 "no Anthropic credentials: export ANTHROPIC_API_KEY or run `ant auth login`"
             )
+        self._check_cap()
 
         async def run() -> None:
             client = self._async()
@@ -603,6 +697,7 @@ class LLMClient:
                 async with sem:
                     started = time.perf_counter()
                     try:
+                        self._check_cap()
                         response = await client.messages.create(**self._extract_request(doc, None))
                     except (
                         anthropic.APIConnectionError,
@@ -643,6 +738,7 @@ class LLMClient:
 
     def _text_call(self, purpose: str, system: str, user: str, max_tokens: int = 300) -> str | None:
         client = self._sync()
+        self._check_cap()
         started = time.perf_counter()
         try:
             response = client.messages.create(

@@ -11,3 +11,4 @@ sim/world/
 *.db-shm
 .DS_Store
 ledger/
+.env

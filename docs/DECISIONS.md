@@ -356,3 +356,12 @@ Choices the spec left open, with the reasoning. Newest at the bottom of each par
     (idempotent; the decision drains the runner so the flow continues in the same request),
     `GET /vendors/{id}` and `/accounts/history` with masked IBANs. `Context.with_principal` lets the
     vendor agent carry out a controller decision under the `controller` principal, logged as such.
+82. **Spend cap and credentials.** `LLMClient` loads `.env` from the repo root (never overriding the
+    environment), tallies every priced call in a machine-wide ledger (`.cache/payguard_spend.db`,
+    `PAYGUARD_SPEND_DB`) and refuses to call the API once the total reaches `PAYGUARD_MAX_USD`
+    (`LLMUnavailable("spend cap reached")`, checked before every request including each document of
+    the async warm-up). Explanations fall back to templates; extraction holds the work. The ledger
+    is per key, not per cache database, so the budget survives new runs and new world directories.
+    Tests with fake clients pass their own ledger path; the two API-backed tests spend for real and
+    count. The runtime's default extraction cache is `sim/extraction_cache.db`, the file the
+    API-backed tests already use, so the 300 documents are extracted once per world.

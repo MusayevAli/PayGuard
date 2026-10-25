@@ -152,7 +152,12 @@ def build_runtime(
         for p in json.loads((world_dir / "people.json").read_text(encoding="utf-8"))
     ]
     owns_llm = llm is None
-    client = llm if llm is not None else LLMClient(cache_db or (out_dir / "llm_cache.db"), now=now)
+    # one extraction cache per world, shared with the API-backed tests: a document is paid for once
+    client = (
+        llm
+        if llm is not None
+        else LLMClient(cache_db or (world_dir.parent / "extraction_cache.db"), now=now)
+    )
     chip: Signer = signer if signer is not None else StubSigner(db_path, jumper_present=jumper)
     key = chip_key()
     bank = MockBank(

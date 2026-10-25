@@ -112,9 +112,18 @@ Fava watches the file, so it refreshes as the ledger posts.
 Run the world through the invoice agent only, from 1 Oct to 5 Nov 2026:
 
 ```bash
-export ANTHROPIC_API_KEY=...                    # or `ant auth login`; nothing else reads the key
+cp .env.example .env                            # then put the real key (sk-ant-...) in .env
 uv run python -m scripts.run_world --until 2026-11-05 --out runs/part3
 ```
+
+`agents/llm.py` loads `.env` (git-ignored; the environment wins over the file) and nothing else
+reads the key. `PAYGUARD_MAX_USD` is a hard budget for the key across every run on this machine:
+spend is tallied in `.cache/payguard_spend.db` from the API's usage figures and once the total
+reaches the cap no further call is made (agents fall back to template explanations, extraction
+raises `LLMUnavailable` and the work is held). `PAYGUARD_MODEL` is the extraction model and
+`PAYGUARD_MODEL_TEXT` the model for explanations and persona replies; `.env.example` pairs Opus 5
+with Haiku 4.5. Extractions are cached per document in `sim/extraction_cache.db`, shared by the
+API-backed tests and the runtime, so a document is paid for once.
 
 The script bootstraps the ledger, steps the clock one sim day at a time, drains the agents after
 every step, scores against the answer key and prints the scoreboard, API usage and cost. Without
