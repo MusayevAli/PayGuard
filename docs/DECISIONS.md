@@ -375,8 +375,10 @@ Choices the spec left open, with the reasoning. Newest at the bottom of each par
     rendered documents, 36 days) cost about USD 9.8 and caught every in-scope headline trap and
     47 of 48 catchable ambient cases with no false positives. The one miss was ours, not the
     model's: the Polish retention clause "Kaucja gwarancyjna" was extracted faithfully but the
-    R15 regex knew only the Czech spelling; the regex now covers every `RETENTION_NOTE` the
-    generator prints and a test enforces that. The API world test's pass ratio excludes cases whose
+    R15 regex knew only the Czech spelling, and the percentage was taken from the first "%" in the
+    notes, which on that invoice was the reverse-charge VAT rate "stawka 0 %". The regex now covers
+    every `RETENTION_NOTE` the generator prints, the percentage comes from the sentence that names
+    the retention, and tests enforce both. The API world test's pass ratio excludes cases whose
     injected events fall after 5 Nov (pending, not missed). The harness warms the extraction cache
     for the whole world at start (four documents at a time), which cut a cold run from about an
     hour to about 25 minutes; a warm run costs cents. The accuracy sample does not cover free-text
