@@ -38,12 +38,15 @@ def test_world_run_through_november_5(world_dir: Path, tmp_path: Path) -> None:
     assert failures == {}, failures
     ambient = [c for c in report.cases if c.tier == "ambient" and c.case != "M2"]
     caught = [c for c in ambient if c.status == "caught"]
+    # a case whose injected events fall after 5 Nov is pending, not missed: it cannot be caught
+    # inside the window and does not belong in the denominator
+    catchable = [c for c in ambient if c.status != "pending"]
     missed = {
-        c.id: [x.detail for x in c.checks if not x.ok] for c in ambient if c.status != "caught"
+        c.id: [x.detail for x in c.checks if not x.ok] for c in catchable if c.status != "caught"
     }
-    assert len(caught) >= 43 and len(caught) / len(ambient) >= 43 / 45, (
+    assert len(caught) >= 43 and len(caught) / len(catchable) >= 43 / 45, (
         len(caught),
-        len(ambient),
+        len(catchable),
         missed,
     )
     assert report.entries_without_evidence == 0

@@ -235,7 +235,11 @@ def validate_parsed(
     ), []
 
 
-_RETENTION = re.compile(r"(retention|holdback|einbehalt|zádržn|zatrzyman|留保|kauce)", re.I)
+_RETENTION = re.compile(
+    r"(retention|holdback|einbehalt|zádržn|zatrzyman|留保|検収後に支払|kauce|kaucj)", re.I
+)
+"""Retention clauses as printed: en/de ("Sicherheitseinbehalt"), cs ("Zádržné", "kauce"),
+pl ("Kaucja gwarancyjna", "zatrzymanie"), ja ("留保", "…%は検収後に支払い")."""
 _PERCENT = re.compile(r"(\d{1,2}(?:[.,]\d)?)\s*%")
 
 
