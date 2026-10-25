@@ -16,12 +16,14 @@ from typing import Any
 import structlog
 from pydantic import BaseModel, ConfigDict
 
-from agents.llm import UsageReport
+from agents.llm import LLMUnavailable, UsageReport
 from agents.runtime import Runtime, build_runtime, start_runtime
 from api.main import load_world_events
 from core.events import EventStore
 from core.score import ScoreReport
 from sim.clock import SimClock
+
+log = structlog.get_logger("run_world")
 
 START = datetime(2026, 10, 1, tzinfo=UTC)
 
@@ -76,6 +78,14 @@ def run_world(
     )
     try:
         start_runtime(rt)
+        if rt.invoice_agent is not None:
+            # warm the extraction cache for the whole world up front (four documents at a time)
+            # instead of one document per delivered event: a cache fill, not a decision, so the
+            # event trail is unchanged and a run with everything cached costs nothing extra
+            try:
+                rt.invoice_agent.prefetch(store_events)
+            except LLMUnavailable as exc:
+                log.warning("prefetch_skipped", reason=str(exc))
         if before_start is not None:
             before_start(rt)
         daily: list[bool] = []
