@@ -148,6 +148,9 @@ def create_app(
             clock.stop_loop()
             hub.close()
             if runtime is not None:
+                from api.live_jobs import close_manager
+
+                close_manager(runtime)
                 runtime.close()
             else:
                 store.close()
@@ -314,10 +317,30 @@ def create_app(
         return app
     desk_rt: Runtime = runtime
 
+    @app.post("/controller/check")
+    def check_controller(request: Request) -> dict[str, Any]:
+        require_controller(request)
+        return {
+            "unlocked": True,
+            "controller_required": bool(controller_token),
+            "approval_mode": "authenticated-software",
+            "payment_authorized": False,
+        }
+
     @app.get("/chip/status")
     def chip_status() -> dict[str, Any]:
+        try:
+            status = desk_rt.signer.status().to_json()
+        except (RuntimeError, OSError, ValueError) as exc:
+            raise ApiError(
+                503,
+                "hardware_status_unavailable",
+                f"FPGA status unavailable ({type(exc).__name__}): {str(exc)[:300]}",
+                "Check the USB connection and keep the existing board session. "
+                "Pending payments and their evidence remain recorded; no software fallback is used.",
+            ) from exc
         return {
-            **desk_rt.signer.status().to_json(),
+            **status,
             "signer_kind": desk_rt.signer.kind,
             "controller_required": bool(controller_token),
             "approval_mode": "authenticated-software"

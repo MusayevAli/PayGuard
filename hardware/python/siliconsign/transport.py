@@ -107,8 +107,8 @@ class SerialTransport:
         config[6][termios.VMIN]=0;config[6][termios.VTIME]=0
         termios.tcsetattr(self.fd,termios.TCSANOW,config)
         self.timeout=timeout;self.buffer=b""
-    def _exchange_line(self,data):
-        end=time.monotonic()+self.timeout
+    def _exchange_line(self,data,*,deadline=None):
+        end=time.monotonic()+self.timeout if deadline is None else deadline
         while data:
             _,write,_=select.select([], [self.fd], [], max(0,end-time.monotonic()))
             if not write:raise TransportError("serial write timeout; outcome unknown")
@@ -127,6 +127,27 @@ class SerialTransport:
     def info(self):
         """Read-only, unauthenticated session discovery; never a payment authorization."""
         line=self._exchange_line((json.dumps(HELLO_REQUEST,separators=(",",":"))+"\n").encode())
+        return self._parse_info(line)
+    def resynchronize_read_only(self):
+        """Barrier after a proven read-only STATUS failure, never after a payment.
+
+        A newline terminates a possibly partial old request. Reading through the
+        ordered HELLO reply consumes delayed STATUS output before a new command
+        can be sent. The signer must still authenticate a fresh FPGA STATUS.
+        """
+        request=b"\n"+(json.dumps(HELLO_REQUEST,separators=(",",":"))+"\n").encode()
+        deadline=time.monotonic()+self.timeout
+        line=self._exchange_line(request,deadline=deadline)
+        for attempt in range(8):
+            try:
+                return self._parse_info(line)
+            except (ValueError,TransportError):
+                if attempt==7:
+                    raise TransportError("cannot synchronize read-only status stream") from None
+                line=self._exchange_line(b"",deadline=deadline)
+        raise TransportError("cannot synchronize read-only status stream")
+    @staticmethod
+    def _parse_info(line):
         obj=json.loads(line)
         expected={"event","informational","authorization","mode","session","locked",
                   "next_admin_sequence","next_controller_sequence","next_payment_sequence"}

@@ -37,6 +37,7 @@ def controller(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         "/demo/scenarios/attack",
         "/demo/scenarios/large",
         "/controller/payments/not-a-payment/authorize",
+        "/controller/check",
     ],
 )
 def test_missing_or_wrong_controller_cannot_mutate(controller, headers, path):
@@ -98,3 +99,32 @@ def test_unknown_signer_mode_never_falls_back_to_stub(tmp_path, monkeypatch):
     monkeypatch.setenv("SIGNER", "unknown")
     with pytest.raises(RuntimeError, match="never fall back"):
         create_app(world_dir=tmp_path / "missing-world", db_path=tmp_path / "desk.db")
+
+
+def test_control_password_check_validates_access_without_approval(controller):
+    client, runtime = controller
+    before = runtime.store.latest_seq(), runtime.bank.balances()
+    response = client.post("/controller/check", headers=AUTH)
+    assert response.status_code == 200
+    assert response.json()["unlocked"] is True
+    assert response.json()["payment_authorized"] is False
+    assert (runtime.store.latest_seq(), runtime.bank.balances()) == before
+    assert TOKEN not in response.text
+
+
+def test_failed_chip_status_is_actionable_json_and_never_fabricates_connection(controller, monkeypatch):
+    client, runtime = controller
+    before = runtime.store.latest_seq(), runtime.bank.balances()
+
+    def disconnected():
+        raise OSError("USB serial port is unavailable")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(runtime.signer, "status", disconnected)
+        response = client.get("/chip/status")
+        assert response.status_code == 503
+        assert response.json()["error"]["code"] == "hardware_status_unavailable"
+        assert "USB" in response.json()["error"]["message"]
+        assert "no software fallback" in response.json()["error"]["hint"]
+    assert client.get("/chip/status").status_code == 200
+    assert (runtime.store.latest_seq(), runtime.bank.balances()) == before

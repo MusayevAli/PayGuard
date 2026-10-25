@@ -81,10 +81,107 @@ class Runner:
                 self._scoreboard.publish()
             return handled
 
-    def run_task(self, agent: Agent, task: Callable[[Context], Any]) -> Any:
+    def drain_events(
+        self, events: Sequence[Event], *, progress: Callable[[dict[str, Any]], None] | None = None
+    ) -> int:
+        """Process stored inputs and events emitted by their handlers, without draining the inbox.
+
+        The normal clock drain retains its ordering. Interactive submissions can
+        process their own event tree while unrelated queued invoices remain queued.
+        Only synchronous events emitted on this worker thread are descendants;
+        arrivals concurrently appended by the clock never enter this queue.
+        """
+        with self._lock:
+            pending: dict[str, Event] = {}
+            for event in events:
+                stored = self._store.get(event.id)
+                if stored is None:
+                    raise ValueError("Scoped processing requires a stored input event")
+                pending[stored.id] = stored
+            thread_id = threading.get_ident()
+            capturing = False
+
+            def capture(event: Event) -> None:
+                if capturing and threading.get_ident() == thread_id:
+                    pending[event.id] = event
+
+            unsubscribe = self._store.subscribe(capture)
+            handled = 0
+            try:
+                for _ in range(self._max_rounds):
+                    count = 0
+                    for agent in self._agents:
+                        selected = sorted(
+                            (
+                                event
+                                for event in list(pending.values())
+                                if event.type in agent.subscribes
+                                and not self._store.is_handled(agent.principal, event.id)
+                            ),
+                            key=lambda event: event.seq or 0,
+                        )
+                        for event in selected:
+                            activity = {
+                                "agent": agent.principal,
+                                "event_id": event.id,
+                                "event_type": event.type,
+                                "refs": [event.id],
+                            }
+                            self._progress(progress, {**activity, "state": "working"})
+                            capturing = True
+                            try:
+                                self._handle(agent, event)
+                            finally:
+                                capturing = False
+                            self._progress(progress, {**activity, "state": "finished"})
+                            count += 1
+                    handled += count
+                    if count == 0:
+                        break
+                if self._scoreboard is not None:
+                    self._scoreboard.publish()
+                return handled
+            finally:
+                unsubscribe()
+
+    @staticmethod
+    def _progress(
+        callback: Callable[[dict[str, Any]], None] | None, activity: dict[str, Any]
+    ) -> None:
+        """A presentation observer must never change the result of an agent action."""
+        if callback is not None:
+            try:
+                callback(activity)
+            except Exception:
+                log.warning("progress_observer_failed", agent=activity["agent"])
+
+    def run_task(
+        self,
+        agent: Agent,
+        task: Callable[[Context], Any],
+        *,
+        scoped: bool = False,
+        progress: Callable[[dict[str, Any]], None] | None = None,
+        refs: Sequence[str] = (),
+    ) -> Any:
         """Run ``task(ctx)`` for ``agent`` outside an event (a button press, an operator action)
         with the same policy context and error-to-event handling as ``drain``; then drain."""
         with self._lock:
+            activity = {
+                "agent": agent.principal,
+                "event_id": None,
+                "event_type": "operator_task",
+                "refs": list(refs),
+            }
+            self._progress(progress, {**activity, "state": "working"})
+            created: list[Event] = []
+            thread_id = threading.get_ident()
+
+            def capture(event: Event) -> None:
+                if threading.get_ident() == thread_id:
+                    created.append(event)
+
+            unsubscribe = self._store.subscribe(capture) if scoped else lambda: None
             ctx = Context(
                 principal=agent.principal,
                 policy=self._policy,
@@ -93,6 +190,7 @@ class Runner:
                 explainer=self._explainer,
                 messenger=self._messenger,
             )
+            error: str | None = None
             try:
                 result = task(ctx)
             except Exception as exc:
@@ -104,9 +202,21 @@ class Runner:
                     principal=agent.principal,
                     rule_id=None,
                 )
-                self._system_error(agent.principal, exc, refs=[], code=type(exc).__name__)
+                self._system_error(agent.principal, exc, refs=list(refs), code=type(exc).__name__)
+                error = f"{type(exc).__name__}: {exc}"[:1000]
                 result = None
-            self.drain()
+            finally:
+                unsubscribe()
+            self._progress(
+                progress,
+                {**activity, "state": "failed", "error": error}
+                if error is not None
+                else {**activity, "state": "finished"},
+            )
+            if scoped:
+                self.drain_events(created, progress=progress)
+            else:
+                self.drain()
             return result
 
     def _handle(self, agent: Agent, ev: Event) -> None:

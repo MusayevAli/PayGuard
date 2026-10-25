@@ -100,7 +100,7 @@ def test_packager_matches_source_allowlist_without_state(tmp_path, project, monk
     spec = importlib.util.spec_from_file_location('package_demo', ROOT / 'scripts/package_demo_update.py')
     packager = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(packager)
-    assert set(packager.FILES) == update.ALLOWED and len(update.ALLOWED) == 12
+    assert set(packager.FILES) == update.ALLOWED and len(update.ALLOWED) == 17
     monkeypatch.setattr(packager, 'ROOT', project)
     for name in packager.FILES:
         target = project / name
@@ -111,7 +111,7 @@ def test_packager_matches_source_allowlist_without_state(tmp_path, project, monk
     packager.build(output)
     assert set(update.load_payload(output)) == update.ALLOWED
     with zipfile.ZipFile(output) as archive:
-        assert all(not name.startswith(('payload/private/', 'payload/runtime/', 'payload/hardware/'))
+        assert all(not name.startswith(('payload/private/', 'payload/runtime/', 'payload/hardware/rtl/'))
                    for name in archive.namelist())
 def test_listening_server_refused_without_killing_or_changing_files(project):
     with socket.socket() as server:

@@ -18,6 +18,9 @@ from pydantic import BaseModel, ConfigDict
 
 from agents.payment_agent import Group
 from agents.runtime import Runtime
+from api.authorization import authorization_indicator
+from api.judge import InvoiceForm
+from api.live_jobs import JobConflict, get_manager
 from core.events import make_event
 from core.ledger import Evidence, JournalEntryDraft, JournalLineDraft
 from core.policy import PostAction
@@ -52,6 +55,12 @@ ATTACK_IBAN = "DE02120300000000202051"
 class LiveRunRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     run_id: UUID
+
+
+class InvoiceJobRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    run_id: UUID
+    invoice: InvoiceForm
 
 
 def _invoice_id(scenario: str, run_id: str | None = None) -> str:
@@ -196,7 +205,9 @@ def _emit(rt: Runtime, type_: str, payload: dict[str, Any]):
     ).event
 
 
-def _invoice_fixture(rt: Runtime, scenario: str, run_id: str | None = None) -> None:
+def _invoice_fixture(
+    rt: Runtime, scenario: str, run_id: str | None = None, *, progress: Callable | None = None
+) -> None:
     """Generate input facts; the existing invoice agent checks and posts them."""
     now = rt.clock.sim_now
     selected = None
@@ -265,8 +276,8 @@ def _invoice_fixture(rt: Runtime, scenario: str, run_id: str | None = None) -> N
         plant="DE",
         note="Explicit live-demo receipt fixture.",
     )
-    _emit(rt, "po_created", {"po": po.model_dump(mode="json")})
-    _emit(rt, "goods_received", {"receipt": receipt.model_dump(mode="json")})
+    po_event = _emit(rt, "po_created", {"po": po.model_dump(mode="json")})
+    receipt_event = _emit(rt, "goods_received", {"receipt": receipt.model_dump(mode="json")})
 
     def number(amount: int) -> str:
         return format_number(amount, "EUR", supplier.number_locale)
@@ -298,7 +309,7 @@ def _invoice_fixture(rt: Runtime, scenario: str, run_id: str | None = None) -> N
         ],
         "notes": "Explicit structured demo fixture. The invoice agent uses its ordinary validation and matching rules.",
     }
-    _emit(
+    invoice_event = _emit(
         rt,
         "judge_injection",
         {
@@ -308,7 +319,10 @@ def _invoice_fixture(rt: Runtime, scenario: str, run_id: str | None = None) -> N
             "resulting_event_id": None,
         },
     )
-    rt.runner.drain()
+    if progress is not None:
+        rt.runner.drain_events([po_event, receipt_event, invoice_event], progress=progress)
+    else:
+        rt.runner.drain()
 
 
 def _attack_fixture(rt: Runtime, marker: Any, ctx: Any, run_id: str | None = None) -> None:
@@ -437,29 +451,30 @@ def create_demo_router(
 
     @router.get("/demo")
     def demo_state() -> dict[str, Any]:
-        with lock:
-            latest = {}
-            for run_id, marker in _run_markers(runtime).items():
-                latest[marker.payload["form"]["demo_scenario"]] = run_id
-            scenarios = []
-            for name in SCENARIOS:
-                card = _view(runtime, name)
-                run_id = latest.get(name)
-                card["latest_run_id"] = run_id
-                card["latest_run"] = _view(runtime, name, run_id) if run_id else None
-                scenarios.append(card)
-            return {
-                "signer_kind": runtime.signer.kind,
-                "bank_mode": "simulated",
-                "fixture_mode": "explicit",
-                "resets_existing_state": False,
-                "scenarios": scenarios,
-                "notice": "Run live creates a fresh input and signer request. View result reads a previous execution. Inputs are demo fixtures; outcomes come from the selected signer, agents, ledger and simulated bank.",
-            }
+        latest = {}
+        for run_id, marker in _run_markers(runtime).items():
+            latest[marker.payload["form"]["demo_scenario"]] = run_id
+        scenarios = []
+        for name in SCENARIOS:
+            card = _view(runtime, name)
+            run_id = latest.get(name)
+            card["latest_run_id"] = run_id
+            card["latest_run"] = _view(runtime, name, run_id) if run_id else None
+            scenarios.append(card)
+        return {
+            "signer_kind": runtime.signer.kind,
+            "bank_mode": "simulated",
+            "fixture_mode": "explicit",
+            "resets_existing_state": False,
+            "scenarios": scenarios,
+            "notice": "Run live creates a fresh input and signer request. View result reads a previous execution. Inputs are demo fixtures; outcomes come from the selected signer, agents, ledger and simulated bank.",
+        }
 
     dependencies = [Depends(require_controller)] if require_controller is not None else []
 
-    def execute(scenario: Scenario, run_id: str | None = None) -> dict[str, Any]:
+    def execute(
+        scenario: Scenario, run_id: str | None = None, *, progress: Callable | None = None
+    ) -> dict[str, Any]:
         if runtime.invoice_agent is None or runtime.payment_agent is None:
             raise HTTPException(503, "The invoice and payment agents must be enabled.")
         # Check the selected device before introducing any fixture state. No stub fallback.
@@ -495,9 +510,13 @@ def create_demo_router(
             runtime.runner.run_task(
                 runtime.payment_agent,
                 lambda ctx: _attack_fixture(runtime, marker, ctx, run_id),
+                **({"scoped": True, "progress": progress, "refs": [_invoice_id(scenario, run_id)]} if progress else {}),
             )
             return _view(runtime, scenario, run_id)
-        _invoice_fixture(runtime, scenario, run_id)
+        if progress is not None:
+            _invoice_fixture(runtime, scenario, run_id, progress=progress)
+        else:
+            _invoice_fixture(runtime, scenario, run_id)
         payables = [
             p
             for p in runtime.ledger.payables()
@@ -511,6 +530,7 @@ def create_demo_router(
                 lambda ctx: runtime.payment_agent._pay(
                     group, ctx, today=runtime.clock.sim_now.date()
                 ),
+                **({"scoped": True, "progress": progress, "refs": [_invoice_id(scenario, run_id)]} if progress else {}),
             )
         return _view(runtime, scenario, run_id)
 
@@ -535,10 +555,123 @@ def create_demo_router(
 
     @router.get("/demo/runs/{run_id}")
     def live_result(run_id: UUID) -> dict[str, Any]:
-        with lock:
-            marker = _run_markers(runtime).get(str(run_id))
-            if marker is None:
-                raise HTTPException(404, "Live run not found.")
-            return _view(runtime, marker.payload["form"]["demo_scenario"], str(run_id))
+        marker = _run_markers(runtime).get(str(run_id))
+        if marker is None:
+            raise HTTPException(404, "Live run not found.")
+        return _view(runtime, marker.payload["form"]["demo_scenario"], str(run_id))
+
+    def job_view(job: dict[str, Any]) -> dict[str, Any]:
+        """Read partial work without the runner or execution lock."""
+        result = job.get("result")
+        if job["kind"] == "invoice":
+            from api.judge import invoice_view
+
+            try:
+                result = invoice_view(runtime, job["invoice_id"])
+            except HTTPException as exc:
+                if exc.status_code != 404:
+                    raise
+        else:
+            marker = _run_markers(runtime).get(job["run_id"])
+            if marker:
+                result = _view(runtime, job["kind"], job["run_id"])
+        evidence = (result or {}).get("evidence_events", [])
+        requests: dict[str, dict[str, Any]] = {}
+        chip_event = None
+        for row in evidence:
+            payload = row.get("payload", {})
+            pay_id = payload.get("pay_id")
+            if row["type"] == "payment_requested":
+                requests[pay_id] = payload
+            elif row["type"] == "chip_response":
+                event = runtime.store.get(row["id"])
+                if event:
+                    chip_event = {
+                        **row,
+                        "indicator": authorization_indicator(event, runtime.signer, requests.get(pay_id)),
+                    }
+        invoice = job["payload"].get("invoice", {})
+        return {
+            "run_id": job["run_id"],
+            "kind": job["kind"],
+            "job_status": job["job_status"],
+            "submitted_at": job["submitted_at"],
+            "updated_at": job["updated_at"],
+            "invoice_id": job["invoice_id"],
+            "source_text": invoice.get("document_text"),
+            "error": job["error"],
+            "progress": job["progress"],
+            "evidence_events": evidence,
+            "result": result,
+            "pay_id": (result or {}).get("pay_id") or next(iter(reversed((result or {}).get("pay_ids", []))), None),
+            "packet_id": (result or {}).get("packet_id") or next(iter(reversed((result or {}).get("packet_ids", []))), None),
+            "chip_event": chip_event,
+            "chip_indicator": chip_event["indicator"] if chip_event else None,
+            "bank_mode": "simulated",
+            "signer_kind": runtime.signer.kind,
+        }
+
+    def progress_adapter(report: Callable) -> Callable:
+        def observed(item: dict[str, Any]) -> None:
+            agent = item.get("agent", "desk")
+            state = item.get("state") or item.get("status")
+            stage = item.get("event_type") or item.get("stage", "processing")
+            failed = state == "failed"
+            verb = "Processing failed for" if failed else "Processing" if state in ("working", "running") else "Finished processing"
+            report({
+                **item,
+                "stage": stage,
+                "agent": agent,
+                "status": "failed" if failed else "running" if state in ("working", "running") else "completed",
+                "message": item.get("error") or item.get("message") or f"{verb} {stage.replace('_', ' ')}.",
+            })
+        return observed
+
+    @router.post("/demo/jobs/invoice", status_code=202, dependencies=dependencies)
+    def start_invoice_job(request: InvoiceJobRequest) -> dict[str, Any]:
+        from api.judge import submit_invoice
+
+        run_id = str(request.run_id)
+        invoice_id = "LIVE-" + request.run_id.hex.upper()
+        payload = {"invoice": request.invoice.model_dump(mode="json")}
+
+        def work(report: Callable) -> dict[str, Any]:
+            return submit_invoice(
+                runtime, request.invoice, invoice_id=invoice_id, progress=progress_adapter(report)
+            )
+
+        try:
+            job = get_manager(runtime).submit(run_id, "invoice", payload, invoice_id, work)
+        except JobConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return job_view(job)
+
+    @router.post("/demo/jobs/{scenario}", status_code=202, dependencies=dependencies)
+    def start_scenario_job(scenario: Scenario, request: LiveRunRequest) -> dict[str, Any]:
+        run_id = str(request.run_id)
+
+        def work(report: Callable) -> dict[str, Any]:
+            with lock:
+                marker = _run_markers(runtime).get(run_id)
+                if marker:
+                    if marker.payload["form"]["demo_scenario"] != scenario:
+                        raise JobConflict("This run ID already belongs to a different scenario.")
+                    return _view(runtime, scenario, run_id)
+                return execute(scenario, run_id, progress=progress_adapter(report))
+
+        try:
+            job = get_manager(runtime).submit(
+                run_id, scenario, {"scenario": scenario}, _invoice_id(scenario, run_id), work
+            )
+        except JobConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return job_view(job)
+
+    @router.get("/demo/jobs/{run_id}")
+    def get_job(run_id: UUID) -> dict[str, Any]:
+        job = get_manager(runtime).get(str(run_id))
+        if job is None:
+            raise HTTPException(404, "Live request not found.")
+        return job_view(job)
 
     return router

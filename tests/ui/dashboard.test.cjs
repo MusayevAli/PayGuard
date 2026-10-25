@@ -47,7 +47,7 @@ function harness(storage = new Map()) {
     }
   };
   vm.createContext(context);
-  vm.runInContext(source.replace('  navigate().then(connectLive);', '  globalThis.ui = { state, setBusy, act, render, renderDemo, refreshDataset, renderDataset, navigate, runScenario, openPayment, openDatasetRecord, datasetDocumentLink, eventDescription, authorizationState, renderAuthorization, paymentAuthorization, demoReceipt, pauseDesk, applyClock, renderClock, renderProgress, hardwareDetails, refresh, runLiveScenario, openLiveResult, pendingLiveRun };'), context);
+  vm.runInContext(source.replace('  navigate().then(connectLive);', '  globalThis.ui = { state, setBusy, act, render, renderDemo, refreshDataset, renderDataset, navigate, runScenario, openPayment, openDatasetRecord, datasetDocumentLink, eventDescription, authorizationState, renderAuthorization, paymentAuthorization, demoReceipt, pauseDesk, applyClock, renderClock, renderProgress, hardwareDetails, refresh, runLiveScenario, openLiveResult, pendingLiveRun, startLiveJob, pollLiveJob, renderLiveJob, liveJobWorking, loadLiveExample, processLiveInvoice, unlockControls };'), context);
   return { ...context, context, elements, scenarios, liveScenarios, requests, storage };
 }
 
@@ -236,67 +236,168 @@ test('every completed scenario offers a fresh run and a separate historical resu
   assert.equal(h.scenarios[0].disabled, false);
 });
 
-function liveTestNetwork(h, onPost) {
+function liveTestNetwork(h, { onPost, onGet } = {}) {
   const originalFetch = h.context.fetch;
   h.context.fetch = async (url, options) => {
     if (options.method === 'POST') return onPost(url, options);
-    if (url === '/dashboard/payments?limit=1000') return { ok: true, json: async () => ({ payments: [{ pay_id: 'PAY-FRESH', chip: { signer: 'hw', ok: false }, chip_indicator: { state: 'blocked', proof_verified: true, reason: 'not_allowlisted' }, chip_event_id: 'ev_fresh', chip_event_time: '2026-10-26T01:02:03Z' }] }) };
+    if (url.startsWith('/demo/jobs/')) return onGet(url, options);
+    if (url === '/dashboard/payments?limit=1000') return { ok: true, json: async () => ({ payments: [] }) };
     return originalFetch(url, options);
   };
   h.ui.state.controllerToken = 'test';
   h.ui.state.refreshing = true;
   h.ui.state.demo = { scenarios: [{ id: 'attack', started: true }] };
 }
+const ok = data => ({ ok: true, json: async () => data });
+const queuedJob = runId => ({ run_id: runId, kind: 'attack', job_status: 'queued', submitted_at: '2026-10-25T16:00:00Z', progress: [{ agent: 'desk', status: 'queued', message: 'Waiting for the current desk task' }], evidence_events: [] });
+const finishedJob = runId => ({
+  ...queuedJob(runId), job_status: 'completed', pay_id: 'PAY-FRESH', invoice_id: 'LIVE-INV', result: { status: 'held', held_reason: 'not_allowlisted' },
+  evidence_events: [
+    { id: 'ev_invoice', seq: 11, type: 'invoice_received', actor: 'demo_operator', payload: { invoice_id: 'LIVE-INV', format: 'email' } },
+    { id: 'ev_invoice_action', seq: 12, type: 'agent_action', actor: 'invoice_agent', payload: { action_type: 'posted', explanation: 'Matched PO-90001 and receipt GR-9001.', rule_id: 'R2a' } },
+    { id: 'ev_payment', seq: 13, type: 'payment_requested', actor: 'payment_agent', payload: { pay_id: 'PAY-FRESH', amount_minor: 125000, currency: 'EUR', vendor_id: 'V-1' } },
+    { id: 'ev_fresh', seq: 14, type: 'chip_response', actor: 'payment_agent', payload: { signer: 'hw', ok: false, pay_id: 'PAY-FRESH', chip_reason: 'not_allowlisted' } }
+  ],
+  chip_event: { id: 'ev_fresh', seq: 14, event_time: '2026-10-25T16:00:01Z', payload: { signer: 'hw', ok: false, pay_id: 'PAY-FRESH' }, indicator: { state: 'blocked', proof_verified: true, reason: 'account', op: 'COMMIT_INVOICE' } }
+});
 
-test('live request reaches POST with fresh UUID, verified result, and distinct next-run identity', async () => {
-  const h = harness(); const posted = []; let serial = 0;
+test('live job returns immediately and shows waiting while the worker has no result', async () => {
+  const h = harness(); const posts = []; let job;
+  liveTestNetwork(h, {
+    onPost: async (url, options) => { posts.push({ url, body: JSON.parse(options.body) }); job = queuedJob(posts[0].body.run_id); return ok(job); },
+    onGet: async () => ok(job)
+  });
+  await h.ui.runLiveScenario('attack');
+  assert.equal(posts.length, 1);
+  assert.equal(posts[0].url, '/demo/jobs/attack');
+  assert.equal(h.ui.liveJobWorking(), true);
+  assert.match(h.elements.get('live-timeline').innerHTML, /Waiting for the current desk task/);
+  assert.match(h.elements.get('live-fpga-result').innerHTML, /WAITING FOR REQUEST/);
+  assert.doesNotMatch(h.elements.get('live-fpga-result').innerHTML, /authorization-result approved/);
+  assert.equal(h.elements.get('detail-dialog').open, false);
+  await h.ui.runLiveScenario('attack');
+  assert.equal(posts.length, 1);
+});
+
+test('polling shows actual agent explanations and verified hardware output on the same page', async () => {
+  const h = harness(); let job; const posts = []; let serial = 0;
   h.context.crypto.randomUUID = () => `00000000-0000-4000-8000-${String(++serial).padStart(12, '0')}`;
-  liveTestNetwork(h, async (url, options) => {
-    posted.push({ url, body: JSON.parse(options.body), key: options.headers['Idempotency-Key'] });
-    return { ok: true, json: async () => ({ id: 'attack', run_id: JSON.parse(options.body).run_id, run_started_at: '2026-10-26T01:02:03Z', pay_id: 'PAY-FRESH', status: 'held' }) };
+  liveTestNetwork(h, {
+    onPost: async (url, options) => { posts.push(JSON.parse(options.body)); job = queuedJob(posts.at(-1).run_id); return ok(job); },
+    onGet: async () => ok(job)
   });
   await h.ui.runLiveScenario('attack');
-  assert.equal(posted[0].url, '/demo/runs/attack');
-  assert.equal(h.storage.size, 0);
-  assert.match(h.elements.get('dialog-content').innerHTML, /authorization-result blocked/);
-  assert.match(h.elements.get('dialog-content').innerHTML, /Response to this live request · REAL FPGA/);
-  assert.match(h.elements.get('dialog-content').innerHTML, /PAY-FRESH/);
-  assert.match(h.elements.get('dialog-content').innerHTML, /Submitted · real UTC/);
+  job = finishedJob(job.run_id);
+  await h.ui.pollLiveJob();
+  assert.equal(h.ui.liveJobWorking(), false);
+  assert.match(h.elements.get('live-timeline').innerHTML, /Matched PO-90001 and receipt GR-9001/);
+  assert.match(h.elements.get('live-timeline').innerHTML, /Rule R2a/);
+  assert.match(h.elements.get('live-agents').innerHTML, /No action from this agent was recorded/);
+  assert.match(h.elements.get('live-fpga-result').innerHTML, /authorization-result blocked/);
+  assert.match(h.elements.get('live-fpga-result').innerHTML, /REAL FPGA/);
+  assert.match(h.elements.get('live-run-meta').innerHTML, /PAY-FRESH/);
+  assert.equal(h.elements.get('detail-dialog').open, false);
   await h.ui.runLiveScenario('attack');
-  assert.equal(posted.length, 2);
-  assert.notEqual(posted[0].body.run_id, posted[1].body.run_id);
-  assert.notEqual(posted[0].key, posted[1].key);
+  assert.equal(posts.length, 2);
+  assert.notEqual(posts[0].run_id, posts[1].run_id);
 });
 
-test('a lost live response survives page reload and retries exactly the same request identity', async () => {
-  const storage = new Map(); const first = harness(storage); let original;
-  liveTestNetwork(first, async (url, options) => { original = { body: options.body, key: options.headers['Idempotency-Key'] }; throw new Error('Network interrupted'); });
-  await first.ui.runLiveScenario('attack');
-  assert.equal(storage.size, 1);
-  assert.match(first.elements.get('demo-scenarios').innerHTML, /Retry live request/);
-  const reopened = harness(storage); let retry;
-  liveTestNetwork(reopened, async (url, options) => {
-    retry = { body: options.body, key: options.headers['Idempotency-Key'] };
-    return { ok: true, json: async () => ({ id: 'attack', run_id: JSON.parse(options.body).run_id, pay_id: 'PAY-FRESH', status: 'held' }) };
+test('a lost reply restores the original run with GET after reload, without a second POST', async () => {
+  const storage = new Map(); const first = harness(storage); let original; let posts = 0;
+  liveTestNetwork(first, {
+    onPost: async (url, options) => { posts++; original = JSON.parse(options.body); throw new Error('Network interrupted'); },
+    onGet: async () => ok(finishedJob(original.run_id))
   });
-  await reopened.ui.runLiveScenario('attack');
-  assert.deepEqual(retry, original);
-  assert.equal(storage.size, 0);
+  await first.ui.startLiveJob('invoice', { document_text: 'Original invoice text' });
+  assert.equal(posts, 1);
+  assert.equal(first.ui.pendingLiveRun('invoice'), original.run_id);
+  const reopened = harness(storage);
+  liveTestNetwork(reopened, {
+    onPost: async () => { throw new Error('Must not submit again'); },
+    onGet: async () => ok({ ...finishedJob(original.run_id), kind: 'invoice' })
+  });
+  await reopened.ui.startLiveJob('invoice', { document_text: 'Edited text is a different request' });
+  assert.equal(reopened.ui.pendingLiveRun('invoice'), null);
+  assert.equal(reopened.ui.state.liveJob.run_id, original.run_id);
+  assert.match(reopened.elements.get('live-fpga-result').innerHTML, /authorization-result blocked/);
 });
 
-test('an in-flight live request cannot be duplicated and historical viewing sends no POST', async () => {
-  const h = harness(); let finish; let posts = 0;
-  liveTestNetwork(h, async (url, options) => {
-    posts++;
-    return new Promise(resolve => { finish = () => resolve({ ok: true, json: async () => ({ id: 'attack', run_id: JSON.parse(options.body).run_id, pay_id: 'PAY-FRESH', status: 'held' }) }); });
+test('a retry after a confirmed missing job keeps its original invoice body and ID', async () => {
+  const h = harness(); let original; const posts = [];
+  liveTestNetwork(h, {
+    onPost: async (url, options) => { original = JSON.parse(options.body); throw new Error('Network lost before receipt'); },
+    onGet: async () => ({ ok: false, status: 404, json: async () => ({ detail: 'Unknown run' }) })
   });
-  const pending = h.ui.runLiveScenario('attack');
-  await h.ui.runLiveScenario('attack');
-  assert.equal(posts, 1);
-  finish(); await pending;
-  const originalFetch = h.context.fetch;
-  h.context.fetch = async (url, options) => url === '/demo/runs/existing-run' ? { ok: true, json: async () => ({ id: 'attack', run_id: 'existing-run', pay_id: 'PAY-FRESH', status: 'held' }) } : originalFetch(url, options);
-  await h.ui.openLiveResult('existing-run');
-  assert.equal(posts, 1);
-  assert.match(h.elements.get('dialog-content').innerHTML, /Historical recorded response/);
+  await h.ui.startLiveJob('invoice', { document_text: 'Original' });
+  liveTestNetwork(h, {
+    onPost: async (url, options) => { posts.push(JSON.parse(options.body)); return ok({ ...queuedJob(original.run_id), kind: 'invoice' }); },
+    onGet: async () => ({ ok: false, status: 404, json: async () => ({ detail: 'Unknown run' }) })
+  });
+  await h.ui.startLiveJob('invoice', { document_text: 'Changed' });
+  assert.deepEqual(posts[0], original);
+});
+
+test('plain invoice intake sends the actual edited text and uses a read-only example request', async () => {
+  const h = harness(); let posted; let job; const urls = [];
+  h.ui.state.controllerToken = 'test';
+  h.context.fetch = async (url, options) => {
+    urls.push({ url, method: options.method });
+    if (url === '/judge/invoice/example') return ok({ document_text: 'Invoice from the actual PO', notice: 'Matches a recorded receipt.' });
+    if (options.method === 'POST') { posted = JSON.parse(options.body); job = { ...queuedJob(posted.run_id), kind: 'invoice' }; return ok(job); }
+    if (url.startsWith('/demo/jobs/')) return ok(job);
+    throw new Error('Unexpected request');
+  };
+  await h.ui.loadLiveExample();
+  assert.equal(h.elements.get('live-invoice-text').value, 'Invoice from the actual PO');
+  h.elements.get('live-invoice-text').value = 'Changed invoice text';
+  await h.ui.processLiveInvoice();
+  assert.equal(posted.invoice.document_text, 'Changed invoice text');
+  assert.deepEqual(urls[0], { url: '/judge/invoice/example', method: 'GET' });
+});
+
+test('the local control password is checked before controls are marked unlocked', async () => {
+  const h = harness(); h.elements.get('operator-token').value = 'wrong-password';
+  h.elements.get('operator-dialog').open = true;
+  h.context.fetch = async (url, options) => {
+    assert.equal(url, '/controller/check');
+    assert.equal(options.headers['X-Payguard-Controller'], 'wrong-password');
+    return { ok: false, status: 403, json: async () => ({ detail: 'Unlock controls' }) };
+  };
+  await h.ui.unlockControls();
+  assert.equal(h.ui.state.controllerToken, '');
+  assert.equal(h.elements.get('operator-dialog').open, true);
+  assert.match(h.elements.get('operator-error').textContent, /Could not unlock/);
+  h.elements.get('operator-token').value = 'valid-password';
+  h.context.fetch = async () => ok({ unlocked: true, payment_authorized: false });
+  await h.ui.unlockControls();
+  assert.equal(h.elements.get('operator-dialog').open, false);
+  assert.equal(h.elements.get('operator-label').textContent, 'Controls unlocked');
+  assert.equal(h.elements.get('operator-token').value, '');
+});
+
+test('no FPGA response remains gray and agent-supplied HTML is escaped', () => {
+  const h = harness();
+  h.ui.state.liveJob = { ...finishedJob('run'), chip_event: null, evidence_events: [{ id: 'a', seq: 1, type: 'agent_action', actor: 'invoice_agent', payload: { action_type: 'held', explanation: '<img onerror="bad">Missing receipt', rule_id: 'R3' } }], pay_id: null, result: { status: 'held', reason: 'Missing receipt' } };
+  h.ui.renderLiveJob();
+  assert.match(h.elements.get('live-fpga-result').innerHTML, /NO FPGA REQUEST/);
+  assert.doesNotMatch(h.elements.get('live-timeline').innerHTML, /<img onerror/);
+  assert.match(h.elements.get('live-timeline').innerHTML, /&lt;img/);
+  assert.match(h.elements.get('live-next-action').innerHTML, /Missing receipt/);
+});
+
+test('approval reason explains cumulative vendor spending instead of implying a payment passed', () => {
+  const h = harness();
+  const result = h.ui.authorizationState({ ...hardwareEvent(false), indicator: { state: 'blocked', proof_verified: true, reason: 'approval', op: 'PAY' } });
+  assert.match(result.reason, /cumulative vendor spending threshold/);
+  assert.equal(result.state, 'blocked');
+});
+
+test('a response for another run cannot replace the current invoice or FPGA verdict', async () => {
+  const h = harness();
+  h.ui.state.liveRunId = 'original-run';
+  h.ui.state.liveJob = finishedJob('original-run');
+  h.context.fetch = async () => ok(finishedJob('different-run'));
+  await h.ui.pollLiveJob();
+  assert.equal(h.ui.state.liveJob.run_id, 'original-run');
+  assert.match(h.elements.get('live-connection-note').textContent, /different request ID/);
 });

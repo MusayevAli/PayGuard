@@ -44,7 +44,7 @@ from siliconsign.protocol import (
     authenticate,
     command,
 )
-from siliconsign.transport import SerialTransport
+from siliconsign.transport import SerialTransport, TransportError
 
 # isort: on
 from signer.frames import (
@@ -69,6 +69,10 @@ from signer.interface import ChipStatus, SignResult, SlotInfo
 
 class HardwareLocked(RuntimeError):
     """The hardware outcome/state is uncertain. Operator reconciliation is required."""
+
+
+class HardwareUnavailable(HardwareLocked):
+    """A read-only status exchange failed; no payment authority was granted."""
 
 
 SequenceRole = Literal["admin_seq", "controller_seq", "pay_seq"]
@@ -218,6 +222,7 @@ class HardwareSigner:
         self._fixture_onboarding: dict[str, str] = {}
         self._con = sqlite3.connect(str(path), check_same_thread=False, isolation_level=None)
         self._closed = False
+        self._status_read_failed = False
         self._con.row_factory = sqlite3.Row
         self._con.execute("PRAGMA journal_mode=WAL")
         self._con.execute("PRAGMA synchronous=FULL")
@@ -247,14 +252,28 @@ class HardwareSigner:
                 self._state = _decode_state(stored[0])
             if self._state["profile"] != PROFILE:
                 raise HardwareLocked("persisted hardware profile differs")
-            if self._con.execute(
-                "SELECT 1 FROM pg_hw_journal WHERE state='pending' LIMIT 1"
-            ).fetchone():
+            pending = self._con.execute(
+                "SELECT * FROM pg_hw_journal WHERE state='pending' ORDER BY id"
+            ).fetchall()
+            recover_status = self._recoverable_status_polls(pending)
+            if pending and not recover_status:
                 self._lock_down(
                     "unfinished hardware transaction; reconcile journals before restarting"
                 )
+            if recover_status:
+                # Provisional, in-memory only. The durable lock is cleared only
+                # by a later authenticated STATUS and an atomic journal update.
+                self._state["locked"] = False
+                self._state["lock_reason"] = None
+            last = self._con.execute(
+                "SELECT state FROM pg_hw_journal ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            self._status_read_failed = bool(recover_status or (last and last[0] == "read_failed"))
             self._ensure_unlocked()
-            info = self.transport.info()
+            resync = getattr(self.transport, "resynchronize_read_only", None)
+            info = (
+                resync() if self._status_read_failed and callable(resync) else self.transport.info()
+            )
             caps = info.get("capabilities", {})
             if (
                 info.get("mode") != "external-gateway"
@@ -293,7 +312,12 @@ class HardwareSigner:
                         self._lock_down(
                             "board and host sequence journals disagree; operator reconciliation required"
                         )
-                self._read_status()
+                recovering_read = self._status_read_failed
+                self._status_read_failed = False  # HELLO barrier above consumed stale read replies.
+                self._read_status(
+                    reconcile_ids=[row["id"] for row in pending] if recover_status else None,
+                    recovering_read=recovering_read,
+                )
             else:
                 if not initialize:
                     raise HardwareLocked(
@@ -379,6 +403,49 @@ class HardwareSigner:
         if self._state["locked"]:
             raise HardwareLocked(str(self._state["lock_reason"]))
 
+    def _recoverable_status_polls(self, pending: list[sqlite3.Row]) -> bool:
+        """Recognize only old-version locks caused by losing a read-only UART poll.
+
+        A lost payment/commit/approval, an authentication failure, malformed
+        response, or an unexplained crash always requires operator reconciliation.
+        """
+        if not pending or not self._state["initialized"] or not self._state["locked"]:
+            return False
+        reason = self._state["lock_reason"] or ""
+        prefix = "uncertain hardware transaction; do not retry or reset: "
+        if not reason.startswith(prefix):
+            return False
+        failure = reason[len(prefix) :]
+        allowed = (
+            "serial response timeout; do not reissue payment",
+            "serial write timeout; outcome unknown",
+            "serial disconnected",
+        )
+        if failure not in allowed:
+            return False
+        expected = command(Op.STATUS, session=self.session, currency=978).pack().hex()
+        return all(
+            row["command_hex"] == expected and row["request_mac_hex"] == bytes(32).hex()
+            for row in pending
+        )
+
+    def _check_read_barrier(self, info: dict[str, Any]) -> None:
+        """HELLO is a framing barrier, never proof of authorization or FPGA health."""
+        expected = {
+            "mode": self._bridge_mode,
+            "session": self.session.hex(),
+            "locked": False,
+            "capabilities": self._capacity,
+            "clock_divider_hz": HARDWARE_CLOCK_DIVIDER_HZ,
+            "next_admin_sequence": self._state["admin_seq"] + 1,
+            "next_controller_sequence": self._state["controller_seq"] + 1,
+            "next_payment_sequence": self._state["pay_seq"] + 1,
+        }
+        if any(info.get(name) != value for name, value in expected.items()):
+            self._lock_down(
+                "read-only status recovery found a different bridge session or sequence"
+            )
+
     def _lock_down(self, reason: str) -> NoReturn:
         self._state["locked"] = True
         self._state["lock_reason"] = reason
@@ -407,6 +474,9 @@ class HardwareSigner:
     ) -> tuple[Frame, bytes]:
         """Persist intent before sending, then atomically persist result and local effects."""
         self._ensure_unlocked()
+        if frame.op != Op.STATUS and self._status_read_failed:
+            # Never send a state-changing command into an unsynchronized stream.
+            self._read_status()
         key = (
             self._admin_key
             if frame.op in ADMIN_OPS
@@ -466,12 +536,59 @@ class HardwareSigner:
             if self._con.in_transaction:
                 self._con.execute("ROLLBACK")
                 self._state = old_state
+            if frame.op == Op.STATUS and isinstance(exc, (TransportError, OSError, TimeoutError)):
+                # STATUS has no sequence, ledger or authority effect. Preserve
+                # its failed read, and require a clean authenticated read before
+                # any later mutation. Integrity failures still lock below.
+                self._con.execute(
+                    "UPDATE pg_hw_journal SET state='read_failed',error=? WHERE id=?",
+                    (f"{type(exc).__name__}: {exc}", row_id),
+                )
+                self._status_read_failed = True
+                raise HardwareUnavailable(
+                    "FPGA status is unavailable: "
+                    + str(exc)
+                    + "; no payment was authorized by this status request"
+                ) from exc
             self._lock_down("uncertain hardware transaction; do not retry or reset: " + str(exc))
 
-    def _read_status(self) -> Frame:
-        response, _ = self._exchange(command(Op.STATUS, session=self.session, currency=978))
+    def _read_status(
+        self, *, reconcile_ids: list[int] | None = None, recovering_read: bool = False
+    ) -> Frame:
+        recovering_read = recovering_read or self._status_read_failed
+        if self._status_read_failed:
+            resync = getattr(self.transport, "resynchronize_read_only", None)
+            try:
+                info = resync() if callable(resync) else self.transport.info()
+            except (TransportError, OSError, TimeoutError) as exc:
+                raise HardwareUnavailable(
+                    "FPGA status is unavailable: " + str(exc) + "; UART read recovery is incomplete"
+                ) from exc
+            self._check_read_barrier(info)
+        before_counter, before_spent = self._state["auth_counter"], self._state["spent"]
+
+        def reconcile(response: Frame) -> None:
+            if not recovering_read:
+                return
+            if response.words[57] != before_counter or response.integer(60, 2) != before_spent:
+                raise HardwareLocked(
+                    "read-only status recovery found changed spending or authorization count"
+                )
+            for row_id in reconcile_ids or []:
+                self._con.execute(
+                    "UPDATE pg_hw_journal SET state='read_reconciled',error=? WHERE id=? AND state='pending'",
+                    (
+                        "Lost read-only STATUS reconciled by a new authenticated STATUS; no command replayed",
+                        row_id,
+                    ),
+                )
+
+        response, _ = self._exchange(
+            command(Op.STATUS, session=self.session, currency=978), on_ok=reconcile
+        )
         if response.status != Status.OK:
             self._lock_down("FPGA STATUS rejected")
+        self._status_read_failed = False
         return response
 
     def _ok(self, payload: bytes = b"") -> SignResult:

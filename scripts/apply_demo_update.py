@@ -28,6 +28,8 @@ from pathlib import Path
 
 ALLOWED = frozenset({'ui/index.html', 'ui/app.js', 'ui/style.css', 'ui/mark.svg',
                      'api/dataset.py', 'api/main.py', 'api/dashboard.py', 'api/authorization.py', 'api/demo.py',
+                     'api/judge.py', 'api/live_jobs.py', 'agents/runner.py', 'signer/hardware.py',
+                     'hardware/python/siliconsign/transport.py',
                      'sim/clock.py', 'core/bootstrap.py', 'core/events.py'})
 WORLD_FILES = ('world.jsonl', 'suppliers.json', 'people.json', 'fx_rates.json',
                'answer_key.json', 'invoices_truth.json')

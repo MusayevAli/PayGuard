@@ -12,7 +12,7 @@
     vendors: ['Accounts payable', 'Vendors', 'Vendor records, approved accounts and bank-change history.'],
     ledger: ['Accounting', 'Ledger', 'Double-entry journals and the evidence behind them.'],
     events: ['Desk activity', 'Activity', 'Decisions, approvals and errors from the running desk.'],
-    demo: ['Test the desk', 'Demo', 'Run a payment test or add your own invoice.']
+    demo: ['Watch the desk', 'Live demo', 'Submit new information, follow the agents, and inspect the FPGA response.']
   };
   const navNames = { dataset: 'Dataset', payments: 'Payments', invoices: 'Invoices', evidence: 'Approvals', vendors: 'Vendors', ledger: 'Ledger', events: 'Activity', demo: 'Demo' };
   const escape = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
@@ -72,7 +72,8 @@
       const completed = state.demo?.scenarios?.some(s => s.id === button.dataset.scenario && s.started);
       button.disabled = busy && !completed;
     });
-    $$('[data-live-scenario]').forEach(button => { button.disabled = busy; });
+    $$('[data-live-scenario]').forEach(button => { button.disabled = busy || liveJobWorking(); });
+    updateLiveControls();
     renderClock();
   }
   function renderProgress() {
@@ -176,7 +177,7 @@
     if (!response) return { state: 'unknown', label: 'NO FPGA RESULT', reason: 'No recorded payment response is available.' };
     if (response.signer === 'stub' || indicator?.state === 'software') return { state: 'software', label: response.ok === true ? 'SIMULATED APPROVAL' : response.ok === false ? 'SIMULATED REJECTION' : 'SOFTWARE SIMULATION', reason: 'Software result; this is not an FPGA decision.' };
     if (response.signer !== 'hw') return { state: 'unknown', label: 'UNVERIFIED RESPONSE', reason: 'The response is not identified as an FPGA result.' };
-    const reasons = { authenticated_pay: 'Verified payment authorization', not_allowlisted: 'Account is not on the approved list', needs_button: 'Human authorization is required', in_hold: 'Bank-change waiting period has not ended', missing_hardware_proof: 'No authenticated FPGA response was recorded', invalid_hardware_proof: 'Recorded hardware proof could not be verified' };
+    const reasons = { authenticated_pay: 'Verified payment authorization', not_allowlisted: 'Account is not on the approved list', needs_button: 'Human approval required: unusual payment or cumulative vendor spending threshold reached', approval: 'Human approval required: unusual payment or cumulative vendor spending threshold reached', account: 'Destination account does not match the FPGA approved account', in_hold: 'Bank-change waiting period has not ended', missing_hardware_proof: 'No authenticated FPGA response was recorded', invalid_hardware_proof: 'Recorded hardware proof could not be verified' };
     const detail = indicator?.reason ? reasons[indicator.reason] || human(indicator.reason) : 'No verified FPGA decision was recorded.';
     const reason = `${indicator?.op ? `${indicator.op.replaceAll('_', ' ')} · ` : ''}${detail}`;
     if (indicator?.state === 'approved' && indicator.proof_verified === true && response.ok === true) return { state: 'approved', label: 'APPROVED', reason };
@@ -400,12 +401,107 @@
   function pendingLiveRun(id) {
     try { return sessionStorage.getItem(liveRunStorageKey(id)); } catch { return null; }
   }
+  const liveActiveKey = 'payguard.active-live-job';
+  const liveRequestKey = id => `payguard.live-body.${id}`;
+  state.liveJob = null;
+  state.liveRunId = null;
+  state.livePolling = false;
+  state.liveSubmitting = false;
+  state.liveExampleLoading = false;
+  state.liveLastPoll = 0;
+  state.liveLastPollAttempt = 0;
+  state.liveError = '';
+  try {
+    const saved = JSON.parse(sessionStorage.getItem(liveActiveKey) || 'null');
+    if (saved?.run_id) { state.liveRunId = saved.run_id; state.liveJob = { run_id: saved.run_id, kind: saved.kind, job_status: 'reconnecting', evidence_events: [] }; }
+  } catch { /* A missing or malformed browser checkpoint cannot authorize anything. */ }
+  function liveJobWorking() {
+    return state.liveSubmitting || ['queued', 'running', 'submitting'].includes(state.liveJob?.job_status);
+  }
+  function updateLiveControls() {
+    const working = state.busy || liveJobWorking();
+    $('#process-live-invoice').disabled = working;
+    $('#load-live-example').disabled = working || state.liveExampleLoading;
+    $('#process-live-invoice').textContent = liveJobWorking() ? 'Processing…' : pendingLiveRun('invoice') ? 'Retry this invoice' : 'Process live';
+    $$('[data-live-scenario]').forEach(button => { button.disabled = working; });
+    $$('#invoice-judge-form button[type="submit"]').forEach(button => { button.disabled = working; });
+  }
+  function liveJobEvents(job) {
+    const rows = job?.evidence_events || job?.result?.evidence_events || [];
+    return rows.filter(e => e && typeof e === 'object' && e.id).sort((a, b) => (a.seq || 0) - (b.seq || 0));
+  }
+  function liveActor(event) {
+    return event.payload?.agent || event.actor || event.source || 'desk';
+  }
+  function liveEventMessage(event) {
+    const p = event.payload || {};
+    if (event.type === 'agent_action') return p.explanation || p.reason || human(p.action_type) || 'Action recorded';
+    if (event.type === 'agent_progress') return p.message || human(p.stage || p.action_type);
+    if (event.type === 'invoice_received') return `Received ${p.invoice_id || 'invoice'}${p.format ? ` · ${p.format}` : ''}.`;
+    if (event.type === 'invoice_extracted') return 'Invoice fields extracted from the submitted document.';
+    if (event.type === 'system_error') return p.message || p.error || p.code || 'Processing error recorded';
+    return eventDescription(event)[1];
+  }
+  function liveChipEvent(job) {
+    if (job?.chip_event) return job.chip_event;
+    const chips = liveJobEvents(job).filter(e => e.type === 'chip_response');
+    const event = chips[chips.length - 1];
+    if (event) return { ...event, indicator: job.chip_indicator || event.indicator };
+    return paymentAuthorization(state.payments.find(p => p.pay_id === (job?.pay_id || job?.result?.pay_id)));
+  }
+  function renderLiveJob() {
+    updateLiveControls();
+    const job = state.liveJob;
+    $('#live-workspace').hidden = !job;
+    const badge = $('#live-job-status');
+    if (!job) { badge.textContent = 'Ready'; badge.className = 'pill muted'; return; }
+    const status = job.job_status || 'queued';
+    const terminal = ['completed', 'failed', 'interrupted'].includes(status);
+    const result = job.result || {};
+    badge.textContent = ({ queued: 'Queued', running: 'Live · processing', completed: 'Processing complete', failed: 'Needs attention', interrupted: 'Interrupted', submitting: 'Submitting', reconnecting: 'Restoring live run', unknown: 'Check connection' })[status] || human(status);
+    badge.className = `pill ${['failed', 'interrupted'].includes(status) ? 'danger' : ['queued', 'running', 'submitting'].includes(status) ? 'warning' : 'muted'}`;
+    const events = liveJobEvents(job);
+    $('#live-source-record').hidden = !job.source_text;
+    $('#live-submitted-text').textContent = job.source_text || '';
+    const paymentId = job.pay_id || result.pay_id;
+    const invoiceId = job.invoice_id || result.invoice_id;
+    $('#live-run-meta').innerHTML = `<div><strong>${escape(invoiceId || 'New incoming invoice')}</strong>${paymentId ? ` · ${escape(paymentId)}` : ''}<br><span class="mono">Run ${escape(job.run_id)}</span></div><span>${job.submitted_at ? `Submitted ${escape(date(job.submitted_at, true))}` : 'Waiting for server receipt'}</span>`;
+    const progress = job.progress || [];
+    $('#live-agents').innerHTML = [['invoice_agent', 'Invoice agent'], ['vendor_agent', 'Vendor agent'], ['payment_agent', 'Payment agent']].map(([id, name]) => {
+      const actions = events.filter(e => liveActor(e) === id && ['agent_action', 'agent_progress'].includes(e.type));
+      const updates = progress.filter(p => p.agent === id);
+      const latest = actions[actions.length - 1];
+      const update = updates[updates.length - 1];
+      let tone = update?.status === 'running' ? 'running' : update?.status === 'failed' ? 'failed' : update?.status === 'skipped' ? 'skipped' : latest || update ? 'done' : terminal ? 'skipped' : 'waiting';
+      if (terminal && tone === 'running') tone = status === 'failed' || status === 'interrupted' ? 'failed' : 'done';
+      const label = ({ waiting: 'Waiting', running: 'Working', failed: 'Needs attention', skipped: 'No action', done: 'Recorded' })[tone];
+      const message = latest ? liveEventMessage(latest) : update?.message || (terminal ? 'No action from this agent was recorded for this invoice.' : 'Waiting for this invoice to reach the agent.');
+      return `<article class="live-agent ${tone}"><div class="live-agent-header"><h3>${name}</h3>${pill(label, tone === 'failed' ? 'danger' : tone === 'running' ? 'warning' : 'muted')}</div><p>${escape(message)}</p></article>`;
+    }).join('');
+    const relevant = events.filter(e => ['invoice_received', 'invoice_extracted', 'agent_action', 'agent_progress', 'payment_requested', 'chip_response', 'payment_executed', 'bank_rejected', 'escalation', 'controller_decision', 'system_error', 'vendor_message'].includes(e.type));
+    $('#live-event-count').textContent = `${relevant.length} recorded event${relevant.length === 1 ? '' : 's'}`;
+    $('#live-timeline').innerHTML = relevant.length ? relevant.map((event, i) => {
+      const p = event.payload || {};
+      const [title] = eventDescription(event);
+      const actor = ({ invoice_agent: 'Invoice agent', vendor_agent: 'Vendor agent', payment_agent: 'Payment agent', demo_operator: 'Incoming information' })[liveActor(event)] || human(liveActor(event));
+      const titleText = event.type === 'agent_progress' ? human(p.stage || 'Working') : title;
+      const bad = event.type === 'system_error' || event.type === 'bank_rejected' || (event.type === 'chip_response' && p.ok === false);
+      return `<article class="live-step ${bad ? 'error' : ''}"><span class="live-step-index">${i + 1}</span><div class="live-step-content"><div class="live-step-meta"><span>${escape(actor)}</span><span>#${event.seq ?? '—'}</span></div><strong>${escape(titleText)}</strong><p>${escape(liveEventMessage(event))}</p>${p.rule_id ? `<div class="event-rule">Rule ${escape(p.rule_id)}</div>` : ''}${eventButton(event.id, 'Inspect evidence')}</div></article>`;
+    }).join('') : `<div class="empty"><strong>${status === 'queued' ? 'Waiting for the current desk task' : 'Waiting for the first event'}</strong>${escape(progress[progress.length - 1]?.message || 'The timeline fills as the backend records work. No result is assumed.')}</div>`;
+    const chipEvent = liveChipEvent(job);
+    $('#live-fpga-result').innerHTML = chipEvent ? authorizationMarkup(chipEvent, { live: true }) : `<div class="authorization-result unknown" role="status"><span class="authorization-lamp" aria-hidden="true"></span><div><span class="eyebrow">This invoice</span><strong>${terminal ? 'NO FPGA REQUEST' : 'WAITING FOR REQUEST'}</strong><p>${escape(terminal ? 'Processing returned without a recorded FPGA response. Review the agent decision or error below.' : 'The light changes only when a verified FPGA response is recorded.')}</p></div></div>`;
+    const packetIds = [...new Set([job.packet_id, result.packet_id, ...(result.packet_ids || [])].filter(Boolean))];
+    const outcome = job.error || result.reason || result.held_reason || result.outcome || (terminal ? human(result.status || status) : progress[progress.length - 1]?.message || 'Processing the new input.');
+    $('#live-next-action').innerHTML = `<div class="notice ${job.error ? 'error' : ''}">${escape(outcome)}</div>${packetIds.map(id => `<button class="button primary" data-packet="${escape(id)}">Review the evidence packet</button>`).join('')}${paymentId ? `<button class="button" data-payment="${escape(paymentId)}">Inspect this payment</button>` : ''}${result.journal_entry_ids?.length || result.journal_entries?.length ? '<a class="button" href="#ledger">Open ledger</a>' : ''}`;
+    const stale = state.liveLastPoll && Date.now() - state.liveLastPoll > 15000;
+    setNotice('#live-connection-note', state.liveError || (stale ? 'Live updates are delayed. Displaying the last response received; no new outcome is assumed.' : ''), 'warning');
+  }
   function renderDemo() {
     const scenarios = state.demo?.scenarios;
     $('#known-purchase-orders').innerHTML = (state.invoiceOptions?.purchase_orders || []).map(po => `<option value="${escape(po.id)}">${escape(vendorName(po.supplier_id))} / ${escape(po.currency)}</option>`).join('');
     $('#demo-scenarios').innerHTML = scenarios?.length ? scenarios.map((s, n) => {
       const result = s.latest_run_id ? `<button class="button" data-live-result="${escape(s.latest_run_id)}">View last result</button>` : s.started ? `<button class="button" data-scenario="${escape(s.id)}">View result</button>` : '';
-      return `<article class="scenario"><span class="scenario-no">TEST 0${n + 1}</span><h3>${escape(s.title || human(s.id))}</h3><p>${escape(s.description || s.guard || '')}</p><div class="scenario-actions"><button class="button ${s.id === 'attack' ? 'primary' : 'dark'}" data-live-scenario="${escape(s.id)}" ${state.busy ? 'disabled' : ''}>${pendingLiveRun(s.id) ? 'Retry live request' : 'Run new test'}</button>${result}</div></article>`;
+      return `<article class="scenario"><span class="scenario-no">TEST 0${n + 1}</span><h3>${escape(s.id === 'normal' ? 'Process a matching invoice' : s.title || human(s.id))}</h3><p>${escape(s.description || s.guard || '')}</p><div class="scenario-actions"><button class="button ${s.id === 'attack' ? 'primary' : 'dark'}" data-live-scenario="${escape(s.id)}" ${state.busy || liveJobWorking() ? 'disabled' : ''}>${pendingLiveRun(s.id) ? 'Retry live request' : 'Run new test'}</button>${result}</div></article>`;
     }).join('') : `<article class="scenario"><h3>Tests unavailable</h3><p>The demo routes are not available on this server. You can still submit a vendor message below.</p></article>`;
   }
   function render() {
@@ -417,7 +513,7 @@
     if (state.view === 'vendors' || state.view === 'demo') renderVendors();
     if (state.view === 'ledger') renderLedger();
     if (state.view === 'events') renderEvents();
-    if (state.view === 'demo') { renderDemo(); renderScore(); }
+    if (state.view === 'demo') { renderDemo(); renderScore(); renderLiveJob(); }
   }
   async function refresh(force = false) {
     if (state.refreshing) return;
@@ -567,14 +663,14 @@
     try {
       await api(hardware ? `/controller/payments/${encodeURIComponent(payId)}/authorize` : '/stub/button', { method: 'POST', body: {}, controller: true });
       await refresh(true);
-      openPayment(payId);
+      if (state.liveRunId && (state.liveJob?.pay_id === payId || state.liveJob?.result?.pay_id === payId)) { await pollLiveJob(); $('#detail-dialog').close(); } else openPayment(payId);
     } catch (error) { setNotice('#authorize-result', error.message, 'error'); button.disabled = false; }
   }
   function hardwareDetails() {
     const c = state.chip;
     if (!c) { showDetail('Authorization boundary', empty('Boundary unavailable', 'Check the server and hardware connection. No status has been verified.')); return; }
     const isHardware = c.kind === 'hw';
-    showDetail('Authorization boundary', `${pill(isHardware ? 'REAL FPGA' : 'SOFTWARE SIMULATION', isHardware ? '' : 'warning')}<h2 class="detail-title">${isHardware ? 'Connected hardware signer.' : 'Software signer simulation.'}</h2><p class="detail-context">${isHardware ? 'Payment decisions are reported by the connected FPGA transport.' : 'The software signer exercises the protocol and policy checks. It does not demonstrate a physical hardware boundary.'} The bank remains simulated in both modes.</p><div class="detail-grid">${[['Approved account slots', c.slots_used], ['Sequence', c.seq], ['FPGA clock · UTC', c.hardware?.hardware_time != null ? date(Number(c.hardware.hardware_time) * 1000, true) : 'Not reported'], ['Dataset clock · UTC', date(state.clock?.sim_now, true)], ['Hardware day counter', c.day], ['Daily spending cap', money(c.daily_cap_minor)], ['Spent in current day', money(c.daily_spent_minor)], ['Approval threshold', money(c.button_threshold_minor)], ['Signing key loaded', c.key_loaded ? 'Yes' : 'No'], ['Approval nonce available', c.nonce_valid ? 'Yes' : 'No']].map(([title, value]) => `<div class="detail-fact"><span>${title}</span><strong>${escape(value ?? '—')}</strong></div>`).join('')}</div><p class="footnote">The dataset clock controls invoice arrivals. Hardware caps and waiting periods use the FPGA clock.</p><section class="detail-section"><h3>Human authorization</h3><div class="notice warning">Dashboard decisions are authenticated software approvals. They do not establish independent physical presence. The desk must never present a screen click as a physical button.</div><p class="subtle">Use the evidence packet attached to a pending payment to record a controller decision. The configured approval mechanism and remaining checks still apply.</p></section><section class="detail-section"><h3>Provisioned accounts</h3><div class="table-panel"><table><thead><tr><th>Slot</th><th>Account hash prefix</th><th class="number">Vendor cap · EUR</th><th>Hold through day</th></tr></thead><tbody>${(c.slots || []).map(s => `<tr><td>${s.slot}</td><td class="mono">${escape(s.account_hash_prefix)}</td><td class="number">${escape(money(s.cap_minor))}</td><td>${s.hold_until_day}</td></tr>`).join('')}</tbody></table></div></section><details class="supporting-details detail-section"><summary>Raw hardware status</summary><pre class="json">${escape(JSON.stringify(c, null, 2))}</pre></details>`);
+    showDetail('Authorization boundary', `${pill(isHardware ? 'REAL FPGA' : 'SOFTWARE SIMULATION', isHardware ? '' : 'warning')}<h2 class="detail-title">${isHardware ? 'Connected hardware signer.' : 'Software signer simulation.'}</h2><p class="detail-context">${isHardware ? 'Payment decisions are reported by the connected FPGA transport.' : 'The software signer exercises the protocol and policy checks. It does not demonstrate a physical hardware boundary.'} The bank remains simulated in both modes.</p><div class="detail-grid">${[['Approved account slots', c.slots_used], ['Sequence', c.seq], ['FPGA clock · UTC', c.hardware?.hardware_time != null ? date(Number(c.hardware.hardware_time) * 1000, true) : 'Not reported'], ['Dataset clock · UTC', date(state.clock?.sim_now, true)], ['Hardware day counter', c.day], ['Daily spending cap', money(c.daily_cap_minor)], ['Spent in current day', money(c.daily_spent_minor)], ['Vendor daily approval threshold', money(c.button_threshold_minor)], ['Signing key loaded', c.key_loaded ? 'Yes' : 'No'], ['Approval nonce available', c.nonce_valid ? 'Yes' : 'No']].map(([title, value]) => `<div class="detail-fact"><span>${title}</span><strong>${escape(value ?? '—')}</strong></div>`).join('')}</div><p class="footnote">The dataset clock controls invoice arrivals. Hardware caps and waiting periods use the FPGA clock. The approval threshold also applies to cumulative spending for each vendor that day.</p><section class="detail-section"><h3>Human authorization</h3><div class="notice warning">Dashboard decisions are authenticated software approvals. They do not establish independent physical presence. The desk must never present a screen click as a physical button.</div><p class="subtle">Use the evidence packet attached to a pending payment to record a controller decision. The configured approval mechanism and remaining checks still apply.</p></section><section class="detail-section"><h3>Provisioned accounts</h3><div class="table-panel"><table><thead><tr><th>Slot</th><th>Account hash prefix</th><th class="number">Vendor cap · EUR</th><th>Hold through day</th></tr></thead><tbody>${(c.slots || []).map(s => `<tr><td>${s.slot}</td><td class="mono">${escape(s.account_hash_prefix)}</td><td class="number">${escape(money(s.cap_minor))}</td><td>${s.hold_until_day}</td></tr>`).join('')}</tbody></table></div></section><details class="supporting-details detail-section"><summary>Raw hardware status</summary><pre class="json">${escape(JSON.stringify(c, null, 2))}</pre></details>`);
   }
   function demoReceipt(receipt, { fresh = false } = {}) {
     const data = receipt;
@@ -606,27 +702,91 @@
       demoReceipt(receipt);
     } catch (error) { setNotice('#action-notice', error.message, 'error'); }
   }
-  async function runLiveScenario(id) {
-    if (state.busy || !ensureController()) return;
+  async function pollLiveJob() {
+    if (!state.liveRunId || state.livePolling) return;
+    state.livePolling = true;
+    state.liveLastPollAttempt = Date.now();
+    const runId = state.liveRunId;
+    try {
+      const job = await api(`/demo/jobs/${encodeURIComponent(runId)}`);
+      if (runId !== state.liveRunId) return;
+      if (job.run_id !== runId) throw new Error('The server returned a different request ID. Keeping the last recorded result.');
+      const changed = state.liveJob?.updated_at !== job.updated_at || state.liveJob?.job_status !== job.job_status;
+      state.liveJob = job;
+      state.liveLastPoll = Date.now();
+      state.liveError = '';
+      if (job.run_id === runId) {
+        try { sessionStorage.removeItem(liveRunStorageKey(job.kind)); sessionStorage.removeItem(liveRequestKey(job.kind)); } catch { /* Read-only updates still work. */ }
+      }
+      ingest(liveJobEvents(job));
+      renderLiveJob();
+      if (changed && job.pay_id && !liveJobWorking()) loadDemoPayment({ pay_id: job.pay_id }).then(renderLiveJob);
+    } catch (error) {
+      if (runId !== state.liveRunId) return;
+      state.liveError = error.status === 404 ? 'No receipt for this request yet. Retry the same request below; it will keep its original ID.' : `Live updates unavailable: ${error.message}`;
+      if (state.liveJob?.job_status === 'reconnecting') state.liveJob.job_status = 'unknown';
+      renderLiveJob();
+    } finally { state.livePolling = false; }
+  }
+  async function startLiveJob(kind, invoice = null) {
+    if (state.busy || liveJobWorking() || !ensureController()) return;
     let runId;
     try {
-      runId = pendingLiveRun(id) || crypto.randomUUID();
-      // Persist before sending. A reload or lost reply retries this same request.
-      sessionStorage.setItem(liveRunStorageKey(id), runId);
-      renderDemo();
-      const receipt = await act(async () => {
-        const result = await api(`/demo/runs/${encodeURIComponent(id)}`, {
-          method: 'POST', body: { run_id: runId }, controller: true,
-          idempotencyKey: `demo-live-${id}-${runId}`
-        });
-        if (result.run_id !== runId) throw new Error('The desk returned a different run ID. Retry the same live request to check its result.');
-        sessionStorage.removeItem(liveRunStorageKey(id));
-        return result;
-      }, result => `Live request ${result.run_id} returned. Inspect its actual signer result.`, { label: 'Submitting a fresh test to the connected signer' });
-      if (receipt) { await loadDemoPayment(receipt); demoReceipt(receipt, { fresh: true }); }
+      const retryId = pendingLiveRun(kind);
+      runId = retryId || crypto.randomUUID();
+      let payload;
+      try { payload = JSON.parse(sessionStorage.getItem(liveRequestKey(kind)) || 'null'); } catch { payload = null; }
+      if (!payload || payload.run_id !== runId) payload = { run_id: runId, ...(kind === 'invoice' ? { invoice } : {}) };
+      sessionStorage.setItem(liveRunStorageKey(kind), runId);
+      sessionStorage.setItem(liveRequestKey(kind), JSON.stringify(payload));
+      sessionStorage.setItem(liveActiveKey, JSON.stringify({ run_id: runId, kind }));
+      state.liveRunId = runId;
+      state.liveSubmitting = true;
+      state.liveError = '';
+      state.liveJob = { run_id: runId, kind, job_status: 'submitting', source_text: payload.invoice?.document_text, evidence_events: [] };
+      renderDemo(); renderLiveJob();
+      let job;
+      if (retryId) {
+        try { job = await api(`/demo/jobs/${encodeURIComponent(runId)}`); }
+        catch (error) { if (error.status !== 404) throw error; }
+      }
+      if (!job) job = await api(`/demo/jobs/${encodeURIComponent(kind)}`, { method: 'POST', body: payload, controller: true, idempotencyKey: `demo-job-${kind}-${runId}` });
+      if (job.run_id !== runId) throw new Error('The server returned a different request ID. Retry to inspect the original request.');
+      sessionStorage.removeItem(liveRunStorageKey(kind));
+      sessionStorage.removeItem(liveRequestKey(kind));
+      state.liveJob = job;
+      state.liveLastPoll = Date.now();
+      ingest(liveJobEvents(job));
+      setNotice('#action-notice', 'New information received. Follow the live processing below.');
     } catch (error) {
-      setNotice('#action-notice', `${error.message} The same request ID is retained for a safe retry.`, 'error');
-    } finally { renderDemo(); }
+      state.liveError = `${error.message} The original request is kept for retry; it will not submit a second payment.`;
+      if (state.liveJob?.job_status === 'submitting') state.liveJob.job_status = 'unknown';
+      setNotice('#live-intake-error', state.liveError, 'error');
+    } finally {
+      state.liveSubmitting = false;
+      renderDemo(); renderLiveJob();
+      $('#live-workspace').scrollIntoView?.({ behavior: 'smooth', block: 'nearest' });
+    }
+    if (state.liveJob?.job_status !== 'unknown') await pollLiveJob();
+  }
+  async function runLiveScenario(id) { return startLiveJob(id); }
+  async function loadLiveExample() {
+    if (state.liveExampleLoading || liveJobWorking()) return;
+    state.liveExampleLoading = true; updateLiveControls();
+    setNotice('#live-intake-error', '');
+    try {
+      const example = await api('/judge/invoice/example');
+      if (!example.document_text) throw new Error('No example document was returned.');
+      $('#live-invoice-text').value = example.document_text;
+      $('#live-example-note').textContent = example.notice || `New invoice using ${example.purchase_order_id || 'a recorded purchase order'} and existing receipts. You can edit the text before processing.`;
+    } catch (error) { setNotice('#live-intake-error', error.message, 'error'); }
+    finally { state.liveExampleLoading = false; updateLiveControls(); }
+  }
+  async function processLiveInvoice() {
+    setNotice('#live-intake-error', '');
+    const documentText = $('#live-invoice-text').value.trim();
+    if (!documentText && !pendingLiveRun('invoice')) { setNotice('#live-intake-error', 'Load an example invoice or paste invoice text first.', 'error'); return; }
+    return startLiveJob('invoice', { document_text: documentText });
   }
   document.addEventListener('click', async event => {
     const button = event.target.closest('button, a[data-view]');
@@ -662,18 +822,34 @@
   $('#hardware-details').addEventListener('click', hardwareDetails);
   $('#close-dialog').addEventListener('click', () => $('#detail-dialog').close());
   $('#close-operator').addEventListener('click', () => $('#operator-dialog').close());
+  $('#load-live-example').addEventListener('click', loadLiveExample);
+  $('#process-live-invoice').addEventListener('click', processLiveInvoice);
+  $('#live-unlock-controls').addEventListener('click', () => $('#operator-dialog').showModal());
   $('#operator-button').addEventListener('click', () => $('#operator-dialog').showModal());
   $('#operator-mobile-button').addEventListener('click', () => $('#operator-dialog').showModal());
-  $('#operator-form').addEventListener('submit', event => {
-    event.preventDefault();
-    state.controllerToken = $('#operator-token').value.trim();
-    state.controllerName = $('#operator-name').value.trim() || 'controller';
-    $('#operator-token').value = '';
-    $('#operator-label').textContent = 'Settings';
-    $('#operator-dot').className = 'dot orange';
-    $('#operator-dialog').close();
-    setNotice('#action-notice', 'Control password loaded for this tab.');
-  });
+  async function unlockControls(event) {
+    event?.preventDefault();
+    const password = $('#operator-token').value.trim();
+    if (!password) { setNotice('#operator-error', 'Paste the local control password first.', 'error'); return; }
+    const previous = state.controllerToken;
+    state.controllerToken = password;
+    setNotice('#operator-error', 'Checking the control password…');
+    try {
+      const result = await api('/controller/check', { method: 'POST', controller: true, body: {} });
+      if (result.unlocked !== true) throw new Error('The desk did not confirm access.');
+      state.controllerName = $('#operator-name').value.trim() || 'controller';
+      $('#operator-token').value = '';
+      $('#operator-label').textContent = 'Controls unlocked';
+      $('#operator-dot').className = 'dot green';
+      $('#operator-dialog').close();
+      setNotice('#operator-error', '');
+      setNotice('#action-notice', 'Controls unlocked for this tab. Every payment still goes through the FPGA rules.');
+    } catch (error) {
+      state.controllerToken = previous;
+      setNotice('#operator-error', `Could not unlock: ${error.message}`, 'error');
+    }
+  }
+  $('#operator-form').addEventListener('submit', unlockControls);
   $('#lock-operator').addEventListener('click', () => {
     state.controllerToken = ''; $('#operator-token').value = '';
     $('#operator-label').textContent = 'Settings'; $('#operator-dot').className = 'dot';
@@ -727,9 +903,9 @@
         body: data.body.trim() || undefined,
         submitted_by: state.controllerName
       };
-      const result = await act(() => api('/judge/invoice', { method: 'POST', body, controller: true }), result => `Invoice processed. Recorded outcome: ${human(result.status)}${result.reason ? ` — ${result.reason}` : ''}.`, { label: 'Processing your invoice', progressSelector: '#invoice-progress' });
-      if (!result) return;
-      showDetail('Test invoice / Recorded result', `${statusPill(result.status)}<h2 class="detail-title">${escape(result.invoice_id)}</h2><p class="detail-context">${escape(result.reason || 'Inspect the evidence for the invoice agent’s decision.')}</p>${result.rule_id ? `<div class="notice">Rule ${escape(result.rule_id)}</div>` : ''}<p class="footnote">${escape(result.notice || 'This is an explicit invoice fixture in the simulated workspace.')}</p>${(result.packet_ids || []).map(id => `<button class="button primary" data-packet="${escape(id)}">Review packet ${escape(id)}</button>`).join(' ')}<section class="detail-section"><h3>Evidence</h3>${(result.evidence_events || []).map(e => `<button class="evidence-row" data-event="${escape(typeof e === 'string' ? e : e.id)}"><span>${escape(typeof e === 'string' ? 'Event' : human(e.type))}</span><p class="mono">${escape(typeof e === 'string' ? e : e.id)}</p></button>`).join('')}${result.event_id ? eventButton(result.event_id, 'View original invoice event') : ''}</section><section class="detail-section"><h3>Journal entries</h3>${(result.journal_entries || []).map(e => `<button class="button" data-entry="${escape(typeof e === 'string' ? e : e.id)}">${escape(typeof e === 'string' ? e : e.id)}</button>`).join(' ') || '<p class="subtle">No journal entries returned for this invoice.</p>'}</section>`);
+      await startLiveJob('invoice', body);
+      if (state.liveJob?.job_status === 'unknown') setNotice('#invoice-judge-error', state.liveError, 'error');
+      else { setNotice('#invoice-progress', 'Invoice submitted. Follow the live agent timeline above.'); $('#live-workspace').scrollIntoView?.({ behavior: 'smooth', block: 'start' }); }
     } catch (error) { setNotice('#invoice-judge-error', error.message, 'error'); }
   });
   $('#ledger-more').addEventListener('click', async () => {
@@ -747,6 +923,7 @@
   navigate().then(connectLive);
   setInterval(() => { if (!document.hidden) { refresh(); if (state.view === 'dataset') refreshDataset(true); } }, 4000);
   setInterval(() => {
+    if (!document.hidden && state.liveRunId && (state.view === 'demo' || liveJobWorking()) && Date.now() - state.liveLastPollAttempt >= (liveJobWorking() ? 1000 : 4000)) pollLiveJob();
     renderClock(); renderProgress(); renderAuthorization();
     if (state.chip && state.chipReceivedAt && Date.now() - state.chipReceivedAt > 15000) {
       state.chip = null; state.chipReceivedAt = 0; renderRail();
