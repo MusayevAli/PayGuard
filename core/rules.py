@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import re
 from datetime import date
-from decimal import ROUND_CEILING, Decimal
+from decimal import ROUND_CEILING, ROUND_HALF_EVEN, Decimal
 from typing import Final
 
 from core.money import Money, allocate
@@ -22,6 +22,20 @@ BUTTON_THRESHOLD_MINOR: Final[int] = 5000000
 MATERIALITY_MINOR: Final[int] = 1000000
 RETENTION_BP: Final[int] = 1000
 VAT_DISPUTE_ESCALATE_EUR_MINOR: Final[int] = 50000
+# --- Part 4: signer caps and payment run parameters (EUR-equivalent minor units, spec §10)
+ACCOUNT_CAP_EUR_MINOR: Final[int] = 250_000_000
+"""Default per-slot cap provisioned for a legitimate account: EUR 2,500,000.00."""
+DAILY_CAP_EUR_MINOR: Final[int] = 300_000_000
+"""Default daily cap: EUR 3,000,000.00 of signed payments per chip day."""
+NONCE_TIMEOUT_DAYS: Final[int] = 1
+PAY_LEAD_DAYS: Final[int] = 2
+"""A payable joins the run when it falls due within this many days."""
+DISCOUNT_LEAD_DAYS: Final[int] = 0
+"""A discount is taken on its deadline day, the latest value date that still earns it."""
+RECON_GRACE_DAYS: Final[int] = 2
+"""Unmatched statement lines become a notice packet after this many days."""
+INTERCOMPANY_RATE_BP: Final[int] = 400
+"""Assumed annual cost of an intercompany draw (4 %), used to quantify T9 options."""
 
 BOX50: Final[int] = 50
 
@@ -126,3 +140,39 @@ def short_pay(qty_billed: int, qty_received: int) -> tuple[int, int]:
     """R1: (quantity to post, balance still expected)."""
     posted = min(qty_billed, qty_received)
     return posted, max(0, qty_billed - posted)
+
+
+def discount_minor(amount_minor: int, discount_bp: int) -> int:
+    """Early-payment discount on ``amount_minor`` at ``discount_bp``, rounded half-even."""
+    value = Decimal(amount_minor) * Decimal(discount_bp) / Decimal(10_000)
+    return int(value.quantize(Decimal(1), rounding=ROUND_HALF_EVEN))
+
+
+def financing_cost_minor(principal_minor: int, rate_bp: int, days: int) -> int:
+    """Simple interest for ``days`` at ``rate_bp`` per year, rounded half-even."""
+    if days <= 0 or principal_minor <= 0:
+        return 0
+    value = (
+        Decimal(principal_minor) * Decimal(rate_bp) / Decimal(10_000) * Decimal(days) / Decimal(365)
+    )
+    return int(value.quantize(Decimal(1), rounding=ROUND_HALF_EVEN))
+
+
+def is_fee_line(txn_type: str) -> bool:
+    return txn_type == "NCHG"
+
+
+def is_fx_line(txn_type: str) -> bool:
+    return txn_type == "NFEX"
+
+
+_REF_TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9/\-]{3,}")
+
+
+def references_in(remittance: str) -> list[str]:
+    """Document-like tokens in a remittance text (invoice numbers, batch and payment ids)."""
+    out: list[str] = []
+    for token in _REF_TOKEN.findall(remittance.replace("/REMI/", " ").replace("/ORDP/", " ")):
+        if any(ch.isdigit() for ch in token) and token not in out:
+            out.append(token)
+    return out

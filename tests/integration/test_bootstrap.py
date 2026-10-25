@@ -59,7 +59,7 @@ def test_bootstrap_is_idempotent_and_reconciles(
         payables = ledger.ap_open_items(vendor_id=LEGACY_VENDOR_ID)
         assert sorted(p.inv_id for p in payables) == sorted(num for num, _, _ in LEGACY_INVOICES)
         assert sum(p.amount_minor for p in payables) == 18_743_012 and all(
-            p.status == "open" and p.currency == "EUR" for p in payables
+            p.status == "scheduled" and p.currency == "EUR" for p in payables
         )
         assert all(p.due_date >= date(2026, 10, 2) for p in payables)
         for entry in ledger.entries():

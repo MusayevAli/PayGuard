@@ -34,7 +34,18 @@ REASON_CODES: tuple[str, ...] = (
     "duplicate",
     "unknown_account",
 )
-EvidenceRole = Literal["invoice", "receipt", "po", "message", "decision"]
+EvidenceRole = Literal[
+    "invoice",
+    "receipt",
+    "po",
+    "message",
+    "decision",
+    "payment_request",
+    "chip_response",
+    "payment",
+    "statement_line",
+    "provisioning",
+]
 PayableStatus = Literal["open", "scheduled", "paid", "held", "rejected", "netted"]
 OPEN_AP_STATUSES: tuple[str, ...] = ("open", "scheduled", "held")
 

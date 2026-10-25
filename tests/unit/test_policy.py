@@ -157,7 +157,16 @@ def test_principals_table_matches_spec() -> None:
         post=frozenset(), request_payment=False, edit_vendor=True, edit_allowlist=False
     )
     assert PRINCIPALS["payment_agent"] == Scope(
-        post=frozenset({"Assets:Bank:*", "Liabilities:AP*", "Expenses:Bank:*", "Expenses:FX:*"}),
+        post=frozenset(
+            {
+                "Assets:Bank:*",
+                "Liabilities:AP*",
+                "Expenses:Bank:*",
+                "Liabilities:Intercompany",
+                "Expenses:FX:*",
+                "Income:Discounts",
+            }
+        ),
         request_payment=True,
         edit_vendor=False,
         edit_allowlist=False,

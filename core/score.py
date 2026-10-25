@@ -4,8 +4,10 @@ This module (and tests) may read ground truth; agents never do."""
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from datetime import UTC, date, datetime
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict
@@ -171,7 +173,9 @@ class Scoreboard:
             )
         if kind == "payable_status":
             for p in self._ledger.payables():
-                if p.inv_id != check.inv_id or p.status != check.status:
+                if p.inv_id != check.inv_id or (
+                    check.status is not None and p.status != check.status
+                ):
                     continue
                 if check.discount_bp is not None and p.discount_bp != check.discount_bp:
                     continue
@@ -250,6 +254,8 @@ class Scoreboard:
             for e in self._store.query(type="agent_action", limit=100000)
             if e.payload.get("action_type") in PREVENTING_ACTIONS
         ]:
+            if ev.type == "escalation" and ev.payload.get("kind", "anomaly") != "anomaly":
+                continue  # approvals (button, bank change) and notices are controls, not alarms
             refs = set(ev.payload.get("refs", []))
             # an action about an invoice is judged by its invoice ids alone: sharing a vendor or a
             # purchase order with a planted case does not make a hold on another invoice legitimate
@@ -343,3 +349,22 @@ class Scoreboard:
 def month_end(d: date) -> date:
     nxt = date(d.year + (d.month == 12), (d.month % 12) + 1, 1)
     return date.fromordinal(nxt.toordinal() - 1)
+
+
+def scoreboard_from_world(
+    world_dir: Path,
+    *,
+    store: EventStore,
+    ledger: Ledger,
+    vendors: VendorMaster | None = None,
+    fx: FxTable | None = None,
+    now: Callable[[], datetime] | None = None,
+) -> Scoreboard:
+    """Build the scoreboard from a generated world. This is the one place outside tests that reads
+    ``answer_key.json`` and ``invoices_truth.json`` (spec §12)."""
+    key = AnswerKey.model_validate_json((world_dir / "answer_key.json").read_bytes())
+    truth = [
+        Invoice.model_validate(i)
+        for i in json.loads((world_dir / "invoices_truth.json").read_text(encoding="utf-8"))
+    ]
+    return Scoreboard(key, store=store, ledger=ledger, vendors=vendors, truth=truth, fx=fx, now=now)

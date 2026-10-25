@@ -58,7 +58,7 @@ quote-style = "double"
 [tool.mypy]
 python_version = "3.12"
 strict = true
-files = ["core", "sim/models.py"]
+files = ["core", "sim/models.py", "signer", "bank"]
 plugins = ["pydantic.mypy"]
 warn_unreachable = true
 show_error_codes = true

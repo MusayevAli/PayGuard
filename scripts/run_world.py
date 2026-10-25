@@ -1,35 +1,26 @@
-"""Run the generated world with the invoice agent only: bootstrap, step the clock day by day,
-drain agents after every step, score, and report API usage. Used by the integration test and
-for the Part 3 demo (``uv run python -m scripts.run_world --until 2026-11-05``)."""
+"""Run the generated world through the desk: bootstrap, provision, step the clock one sim day at
+a time, drain the agents after every step, score, and report API usage and bank balances.
+``uv run python -m scripts.run_world --until 2026-11-05``."""
 
 from __future__ import annotations
 
 import argparse
 import json
 import sys
-from datetime import UTC, date, datetime
+from collections.abc import Callable, Sequence
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
 
 import structlog
 from pydantic import BaseModel, ConfigDict
 
-from agents.invoice_agent import InvoiceAgent
-from agents.llm import LLMClient, UsageReport
-from agents.runner import Runner
-from agents.state import AgentState
+from agents.llm import UsageReport
+from agents.runtime import Runtime, build_runtime, start_runtime
 from api.main import load_world_events
-from core.bootstrap import bootstrap
 from core.events import EventStore
-from core.ledger import Ledger
-from core.packets import PacketStore
-from core.policy import Policy
-from core.score import Scoreboard, ScoreReport
-from core.vendors import VendorMaster
+from core.score import ScoreReport
 from sim.clock import SimClock
-from sim.fx import load_fx_rates
-from sim.models import AnswerKey, Invoice, Person, Supplier
-from sim.people import Responders
 
 START = datetime(2026, 10, 1, tzinfo=UTC)
 
@@ -43,6 +34,8 @@ class RunResult(BaseModel):
     post_rejections_scope: int
     beancount_path: Path
     db_path: Path
+    bank_balances: dict[str, int]
+    chip_status: dict[str, Any]
 
 
 def run_world(
@@ -51,7 +44,10 @@ def run_world(
     *,
     until: str,
     cache_db: Path | None = None,
-    llm: LLMClient | None = None,
+    llm: Any | None = None,
+    agents: Sequence[str] = ("invoice", "payment"),
+    before_start: Callable[[Runtime], None] | None = None,
+    each_day: Callable[[Runtime, date], None] | None = None,
 ) -> RunResult:
     run_dir.mkdir(parents=True, exist_ok=True)
     db = run_dir / "payguard.db"
@@ -59,102 +55,64 @@ def run_world(
         p = Path(str(db) + suffix)
         if p.exists():
             p.unlink()
-    bean = run_dir / "ledger" / "payguard.beancount"
+    store_events = load_world_events(world_dir / "world.jsonl")
     store = EventStore(db)
-    events = load_world_events(world_dir / "world.jsonl")
-    clock = SimClock(store, events, start=START, speed=1)
-    fx = load_fx_rates(world_dir / "fx_rates.json")
-    ledger = Ledger(db, events=store, fx=fx, now=lambda: clock.sim_now, beancount_path=bean)
-    vendors = VendorMaster(db)
-    packets = PacketStore(db, events=store, now=lambda: clock.sim_now)
-    state = AgentState(db)
-    policy = Policy(
-        ledger=ledger,
-        vendors=vendors,
-        events=store,
-        jumper_present=lambda: False,
-        now=lambda: clock.sim_now,
-    )
-    suppliers = [
-        Supplier.model_validate(s) for s in json.loads((world_dir / "suppliers.json").read_text())
-    ]
-    people = [Person.model_validate(p) for p in json.loads((world_dir / "people.json").read_text())]
-    truth = [
-        Invoice.model_validate(i)
-        for i in json.loads((world_dir / "invoices_truth.json").read_text())
-    ]
-    key = AnswerKey.model_validate(json.loads((world_dir / "answer_key.json").read_text()))
-    bootstrap(ledger, store, vendors, suppliers=suppliers)
-    client = llm or LLMClient(cache_db or (run_dir / "llm_cache.db"), now=lambda: clock.sim_now)
-    responders = Responders(
-        people, events_source=lambda: events + clock.pending_events(), clock=clock, store=store
-    )
-    scoreboard = Scoreboard(
-        key,
-        store=store,
-        ledger=ledger,
-        vendors=vendors,
-        truth=truth,
-        fx=fx,
-        now=lambda: clock.sim_now,
-    )
-    agent = InvoiceAgent(
+    bean = run_dir / "ledger" / "payguard.beancount"
+    clock = SimClock(store, store_events, start=START, speed=1)
+    rt = build_runtime(
         world_dir=world_dir,
-        store=store,
-        ledger=ledger,
-        vendors=vendors,
-        packets=packets,
-        state=state,
-        llm=client,
-        suppliers=suppliers,
-        now=lambda: clock.sim_now,
-    )
-    runner = Runner(
-        store=store,
-        policy=policy,
-        agents=[agent],
-        now=lambda: clock.sim_now,
-        explainer=client,
-        messenger=responders,
-        scoreboard=scoreboard,
-    )
-    runner.attach(clock)
-    daily: list[bool] = []
-    end = date.fromisoformat(until)
-    while clock.sim_now.date() <= end:
-        clock.step()
-        daily.append(ledger.ap_control_reconciles().ok)
-    report = scoreboard.evaluate()
-    actions = store.query(type="agent_action", limit=1_000_000)
-    violations = sum(1 for e in actions if e.payload["action_type"] == "policy_violation")
-    scope_rejections = sum(
-        1
-        for e in actions
-        if e.payload["action_type"] == "post_rejected"
-        and e.payload["decision"].get("reason_code") == "out_of_scope"
-    )
-    usage = client.usage_report()
-    result = RunResult(
-        report=report,
-        usage=usage,
-        daily_reconciliation=daily,
-        policy_violations=violations,
-        post_rejections_scope=scope_rejections,
-        beancount_path=bean,
         db_path=db,
+        store=store,
+        clock=clock,
+        out_dir=run_dir,
+        world_events=store_events,
+        llm=llm,
+        agents=agents,
+        cache_db=cache_db,
+        beancount_path=bean,
     )
-    ledger.close()
-    vendors.close()
-    packets.close()
-    state.close()
-    if llm is None:
-        client.close()
-    store.close()
-    return result
+    try:
+        start_runtime(rt)
+        if before_start is not None:
+            before_start(rt)
+        daily: list[bool] = []
+        end = date.fromisoformat(until)
+        while clock.sim_now.date() <= end:
+            day = clock.sim_now.date()
+            # the morning: statements arrive at 06:00 and the payment run follows them
+            clock.advance_to(datetime.combine(day, time(6, 30), tzinfo=UTC))
+            clock.advance_to(datetime.combine(day + timedelta(days=1), time(0, 0), tzinfo=UTC))
+            daily.append(rt.ledger.ap_control_reconciles().ok)
+            if each_day is not None:
+                each_day(rt, clock.sim_now.date())
+        assert rt.scoreboard is not None
+        report = rt.scoreboard.evaluate()
+        actions = store.query(type="agent_action", limit=1_000_000)
+        violations = sum(1 for e in actions if e.payload["action_type"] == "policy_violation")
+        scope_rejections = sum(
+            1
+            for e in actions
+            if e.payload["action_type"] == "post_rejected"
+            and e.payload["decision"].get("reason_code") == "out_of_scope"
+        )
+        usage = rt.llm.usage_report()
+        return RunResult(
+            report=report,
+            usage=usage,
+            daily_reconciliation=daily,
+            policy_violations=violations,
+            post_rejections_scope=scope_rejections,
+            beancount_path=bean,
+            db_path=db,
+            bank_balances=rt.bank.balances(),
+            chip_status=rt.signer.status().to_json(),
+        )
+    finally:
+        rt.close()
 
 
 def _evidence(db: Path, bean: Path) -> dict[str, Any]:
-    """The verbatim items the Part 3 completion message pastes."""
+    """The verbatim items the completion messages paste."""
     store = EventStore(db)
     t1 = [
         e.payload
@@ -175,9 +133,10 @@ def _evidence(db: Path, bean: Path) -> dict[str, Any]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--world", type=Path, default=Path("sim/world"))
-    parser.add_argument("--out", type=Path, default=Path("runs/part3"))
+    parser.add_argument("--out", type=Path, default=Path("runs/part4"))
     parser.add_argument("--until", default="2026-11-05")
     parser.add_argument("--cache-db", type=Path, default=Path(".cache/llm_cache.db"))
+    parser.add_argument("--agents", default="invoice,payment")
     args = parser.parse_args(argv)
     structlog.configure(
         processors=[
@@ -188,13 +147,21 @@ def main(argv: list[str] | None = None) -> int:
         logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
         cache_logger_on_first_use=True,
     )
-    result = run_world(args.world, args.out, until=args.until, cache_db=args.cache_db)
+    result = run_world(
+        args.world,
+        args.out,
+        until=args.until,
+        cache_db=args.cache_db,
+        agents=tuple(args.agents.split(",")),
+    )
     out = {
         "scoreboard": result.report.model_dump(mode="json"),
         "usage": result.usage.model_dump(),
         "daily_reconciliation_ok": all(result.daily_reconciliation),
         "policy_violations": result.policy_violations,
         "post_rejections_scope": result.post_rejections_scope,
+        "bank_balances": result.bank_balances,
+        "chip": result.chip_status,
         **_evidence(result.db_path, result.beancount_path),
     }
     sys.stdout.write(json.dumps(out, ensure_ascii=False, indent=2) + "\n")

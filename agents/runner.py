@@ -81,6 +81,34 @@ class Runner:
                 self._scoreboard.publish()
             return handled
 
+    def run_task(self, agent: Agent, task: Callable[[Context], Any]) -> Any:
+        """Run ``task(ctx)`` for ``agent`` outside an event (a button press, an operator action)
+        with the same policy context and error-to-event handling as ``drain``; then drain."""
+        with self._lock:
+            ctx = Context(
+                principal=agent.principal,
+                policy=self._policy,
+                store=self._store,
+                now=self._now,
+                explainer=self._explainer,
+                messenger=self._messenger,
+            )
+            try:
+                result = task(ctx)
+            except Exception as exc:
+                log.error(
+                    "agent_task_failed",
+                    agent=agent.principal,
+                    error=repr(exc),
+                    event_id=None,
+                    principal=agent.principal,
+                    rule_id=None,
+                )
+                self._system_error(agent.principal, exc, refs=[], code=type(exc).__name__)
+                result = None
+            self.drain()
+            return result
+
     def _handle(self, agent: Agent, ev: Event) -> None:
         ctx = Context(
             principal=agent.principal,

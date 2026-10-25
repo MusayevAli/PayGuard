@@ -328,7 +328,9 @@ ActionType = Literal[
     "account_suspended",
     "account_restored",
     "payment_run_built",
+    "payment_requested",
     "payment_held",
+    "reconciled",
     "policy_violation",
     "error",
 ]
@@ -460,6 +462,7 @@ class Escalation(StrictModel):
     options: list[str]
     expires_at: AwareDatetime | None
     auto_action_on_expiry: Literal["hold"] = "hold"
+    kind: Literal["anomaly", "approval", "notice"] = "anomaly"
 
 
 class PaymentRequested(StrictModel):
@@ -485,6 +488,17 @@ class ChipResponse(StrictModel):
     latency_ms: int | None
     raw_hex: str | None
     signer: Literal["stub", "hw"]
+
+
+class BankRejected(StrictModel):
+    """The mock bank refused a settlement: bad tag, unknown payment, frame mismatch or funds."""
+
+    pay_id: str
+    reason: str
+    detail: str
+    amount_minor: int = Field(ge=0)
+    currency: Currency
+    account_hash_prefix: str | None
 
 
 class PaymentExecuted(StrictModel):
@@ -579,6 +593,7 @@ EventType = Literal[
     "payment_requested",
     "chip_response",
     "payment_executed",
+    "bank_rejected",
     "provisioning",
     "day_boundary",
     "judge_injection",
@@ -602,6 +617,7 @@ PAYLOAD_MODELS: dict[str, type[BaseModel]] = {
     "payment_requested": PaymentRequested,
     "chip_response": ChipResponse,
     "payment_executed": PaymentExecuted,
+    "bank_rejected": BankRejected,
     "provisioning": Provisioning,
     "day_boundary": DayBoundary,
     "judge_injection": JudgeInjection,
@@ -700,7 +716,8 @@ class NoEventCheck(StrictModel):
 class PayableStatusCheck(StrictModel):
     kind: Literal["payable_status"]
     inv_id: str
-    status: Literal["open", "scheduled", "paid", "held", "rejected", "netted"]
+    status: Literal["open", "scheduled", "paid", "held", "rejected", "netted"] | None = None
+    """None: any status (the check is about the recorded terms, not the payment state)."""
     discount_bp: int | None = None
     retention_minor: int | None = None
 

@@ -21,7 +21,7 @@ INVOICE_AGENT_CASES = ("T1", "T2", "T3", "T4", "T5", "T6", "T10")
 @pytest.fixture(scope="module")
 def result(tmp_path_factory: pytest.TempPathFactory) -> RunResult:
     out = tmp_path_factory.mktemp("world_offline")
-    return run_world(WORLD, out, until="2026-11-05", llm=TruthLLM(WORLD))
+    return run_world(WORLD, out, until="2026-11-05", llm=TruthLLM(WORLD), agents=("invoice",))
 
 
 def _failed(case) -> list[tuple[str, str]]:

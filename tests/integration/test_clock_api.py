@@ -29,7 +29,9 @@ def all_events(client: TestClient) -> list[dict]:
 
 @pytest.fixture
 def client(world_dir: Path, tmp_path: Path):
-    app = create_app(world_dir=world_dir, db_path=tmp_path / "events.db", ping_interval=0.5)
+    app = create_app(
+        world_dir=world_dir, db_path=tmp_path / "events.db", ping_interval=0.5, desk=False
+    )
     with TestClient(app) as c:
         yield c
 

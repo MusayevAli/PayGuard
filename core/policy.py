@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, NoReturn
 import structlog
 
 from core.events import EventStore, make_event
+from core.rules import BUTTON_THRESHOLD_MINOR
 from core.vendors import VendorBankAccount, VendorMaster, account_hash
 
 if TYPE_CHECKING:
@@ -49,7 +50,14 @@ PRINCIPALS: dict[str, Scope] = {
         post=set(), request_payment=False, edit_vendor=True, edit_allowlist=False
     ),
     "payment_agent": Scope(
-        post={"Assets:Bank:*", "Liabilities:AP*", "Expenses:Bank:*", "Expenses:FX:*"},
+        post={
+            "Assets:Bank:*",
+            "Liabilities:AP*",
+            "Liabilities:Intercompany",
+            "Expenses:Bank:*",
+            "Expenses:FX:*",
+            "Income:Discounts",
+        },
         request_payment=True,
         edit_vendor=False,
         edit_allowlist=False,
@@ -149,6 +157,19 @@ class SetOnChipAction:
     account_id: str
 
 
+@dataclass(frozen=True)
+class RequestPaymentAction:
+    """Ask the signer to authorise a payment to ``account_id`` (spec §7.5, §8)."""
+
+    pay_id: str
+    vendor_id: str
+    account_id: str
+    amount_minor: int
+    currency: str
+    eur_equiv_minor: int
+    payable_ids: tuple[str, ...]
+
+
 Action = (
     PostAction
     | ReverseAction
@@ -160,6 +181,7 @@ Action = (
     | SuspendAccountAction
     | RestorePriorAction
     | SetOnChipAction
+    | RequestPaymentAction
 )
 
 
@@ -235,6 +257,8 @@ class Policy:
                 return self._restore_prior(action, principal, scope)
             if isinstance(action, SetOnChipAction):
                 return self._set_on_chip(action, principal, scope)
+            if isinstance(action, RequestPaymentAction):
+                return self._request_payment(action, principal, scope)
         except PolicyViolation:
             raise
 
@@ -591,6 +615,54 @@ class Policy:
             rule_id="R9",
         )
         return restored
+
+    def _request_payment(
+        self, action: RequestPaymentAction, principal: str, scope: Scope
+    ) -> VendorBankAccount:
+        self._require(
+            scope.request_payment,
+            principal,
+            action,
+            "request_payment_required",
+            "requesting a payment needs request_payment scope",
+            [action.pay_id, action.vendor_id],
+        )
+        if action.amount_minor <= 0:
+            self._violation(
+                principal,
+                action,
+                "non_positive_amount",
+                f"payment {action.pay_id} has amount {action.amount_minor}",
+                refs=[action.pay_id],
+            )
+        acct = self._account(action.account_id, principal, action)
+        if acct.vendor_id != action.vendor_id:
+            self._violation(
+                principal,
+                action,
+                "account_vendor_mismatch",
+                f"account {acct.id} belongs to {acct.vendor_id}, not {action.vendor_id}",
+                refs=[action.pay_id, acct.id, action.vendor_id],
+            )
+        if acct.status != "active":
+            self._violation(
+                principal,
+                action,
+                "account_not_active",
+                f"account {acct.id} is {acct.status}; only active accounts may be paid",
+                refs=[action.pay_id, acct.id],
+            )
+        log.info(
+            "payment_request_allowed",
+            principal=principal,
+            pay_id=action.pay_id,
+            vendor_id=action.vendor_id,
+            account_id=acct.id,
+            eur_equiv_minor=action.eur_equiv_minor,
+            event_id=None,
+            rule_id="R10" if action.eur_equiv_minor > BUTTON_THRESHOLD_MINOR else None,
+        )
+        return acct
 
     def _set_on_chip(
         self, action: SetOnChipAction, principal: str, scope: Scope

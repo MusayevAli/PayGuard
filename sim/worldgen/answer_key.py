@@ -262,7 +262,8 @@ def checks_for(
         ]
     if case == "A11":
         return [
-            {"kind": "payable_status", "inv_id": invs[0].id, "status": "open", "discount_bp": 200},
+            # the terms matter, not whether the payment desk has since paid or held it
+            {"kind": "payable_status", "inv_id": invs[0].id, "status": None, "discount_bp": 200},
             _journal(ev[0], "Liabilities:AP", credit=invs[0].gross_minor),
         ]
     if case == "A12":

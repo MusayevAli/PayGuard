@@ -135,6 +135,7 @@ def bootstrap(
             amount_minor=amount,
             currency="EUR",
             due_date=invoice_date + timedelta(days=30),
+            status="scheduled",  # already in the bank batch PAY-BATCH-0001 of 2 Oct
         )
         if number not in before:
             payables_created += 1

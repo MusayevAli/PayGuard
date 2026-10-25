@@ -101,7 +101,8 @@ def _parse_amount(text: str, currency: str) -> int:
         raise MT940Error(f"bad amount {text!r}")
     if len(frac) > digits:
         raise MT940Error(f"amount {text!r} has more decimals than {currency} allows")
-    return int(whole) * 10**digits + (int(frac.ljust(digits, "0")) if digits else 0)
+    scale = int(10**digits)
+    return int(whole) * scale + (int(frac.ljust(digits, "0")) if digits else 0)
 
 
 def _fmt_balance(minor: int, on: date, currency: str) -> str:
