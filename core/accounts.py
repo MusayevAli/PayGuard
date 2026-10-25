@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Final, Literal
 
-AccountType = Literal["Assets", "Liabilities", "Expenses", "Equity"]
+AccountType = Literal["Assets", "Liabilities", "Expenses", "Income", "Equity"]
 
 CHART: Final[tuple[str, ...]] = (
     "Assets:Bank:EUR",
@@ -15,6 +15,7 @@ CHART: Final[tuple[str, ...]] = (
     "Liabilities:AP:Retention",
     "Liabilities:GRNI",
     "Liabilities:VAT:Output",
+    "Liabilities:Intercompany",
     "Expenses:Materials:Frames",
     "Expenses:Materials:Foam",
     "Expenses:Materials:Trim",
@@ -27,6 +28,7 @@ CHART: Final[tuple[str, ...]] = (
     "Expenses:Bank:Fees",
     "Expenses:FX:Rounding",
     "Expenses:FX:Realized",
+    "Income:Discounts",
     "Equity:Opening",
 )
 _CHART_SET: Final[frozenset[str]] = frozenset(CHART)
@@ -57,6 +59,8 @@ PREPAYMENTS_ACCOUNT: Final[str] = "Assets:Prepayments"
 FX_ROUNDING_ACCOUNT: Final[str] = "Expenses:FX:Rounding"
 FX_REALIZED_ACCOUNT: Final[str] = "Expenses:FX:Realized"
 BANK_FEES_ACCOUNT: Final[str] = "Expenses:Bank:Fees"
+DISCOUNT_INCOME_ACCOUNT: Final[str] = "Income:Discounts"
+INTERCOMPANY_ACCOUNT: Final[str] = "Liabilities:Intercompany"
 OPENING_EQUITY_ACCOUNT: Final[str] = "Equity:Opening"
 
 
@@ -84,6 +88,8 @@ def account_type(name: str) -> AccountType:
         return "Liabilities"
     if head == "Expenses":
         return "Expenses"
+    if head == "Income":
+        return "Income"
     return "Equity"
 
 

@@ -1,0 +1,1106 @@
+{
+ "schema": "payguard-vectors-1",
+ "key_hex": "5061794775617264207369676e6572206b657920303030312074657374766563",
+ "nonce_seed": 7,
+ "day0": 273,
+ "cases": [
+  {
+   "id": "status_fresh",
+   "title": "status of a freshly reset chip",
+   "jumper": false,
+   "before": {},
+   "request_hex": "05000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004d56",
+   "response_hex": "000000000000000000000000000000000000000000000000000000004c4b400000000001",
+   "expect": {
+    "ok": true,
+    "reason": null
+   },
+   "state_after": {
+    "seq": 0,
+    "day": 0,
+    "daily_spent": 0,
+    "nonce": 0,
+    "nonce_valid": false,
+    "slots_used": 0,
+    "key_loaded": false
+   }
+  },
+  {
+   "id": "key_without_jumper",
+   "title": "key load refused while the jumper is absent",
+   "jumper": false,
+   "before": {},
+   "request_hex": "02ff5061794775617264207369676e6572206b65792030303031207465737476656300000000000000000000000000000000000000000000000000000000f7da",
+   "response_hex": "ff0b",
+   "expect": {
+    "ok": false,
+    "reason": "provisioning_locked"
+   },
+   "state_after": {
+    "seq": 0,
+    "day": 0,
+    "daily_spent": 0,
+    "nonce": 0,
+    "nonce_valid": false,
+    "slots_used": 0,
+    "key_loaded": false
+   }
+  },
+  {
+   "id": "key_with_jumper",
+   "title": "key load accepted with the jumper",
+   "jumper": true,
+   "before": {},
+   "request_hex": "02ff5061794775617264207369676e6572206b65792030303031207465737476656300000000000000000000000000000000000000000000000000000000f7da",
+   "response_hex": "00ff",
+   "expect": {
+    "ok": true,
+    "reason": null
+   },
+   "state_after": {
+    "seq": 0,
+    "day": 0,
+    "daily_spent": 0,
+    "nonce": 0,
+    "nonce_valid": false,
+    "slots_used": 0,
+    "key_loaded": true
+   }
+  },
+  {
+   "id": "prov_slot0",
+   "title": "allowlist slot 0 (A), cap 2,500.00, no hold",
+   "jumper": true,
+   "before": {},
+   "request_hex": "02004936b2c99d5f5a2d8baad14ffbee7298a56aa6fcef764cb18fca5e32bdebeb2e000000000003d0900111000000000000000000000000000000000000b1c5",
+   "response_hex": "0000",
+   "expect": {
+    "ok": true,
+    "reason": null
+   },
+   "state_after": {
+    "seq": 0,
+    "day": 0,
+    "daily_spent": 0,
+    "nonce": 0,
+    "nonce_valid": false,
+    "slots_used": 1,
+    "key_loaded": true
+   }
+  },
+  {
+   "id": "prov_slot1_hold",
+   "title": "allowlist slot 1 (B) in hold until day 280",
+   "jumper": true,
+   "before": {},
+   "request_hex": "0201b880807d5aaa19373c5bc0a8c7780b106bb4758587148d9fe0fa2868d0a38e33000000000007a12001180000000000000000000000000000000000008ccf",
+   "response_hex": "0001",
+   "expect": {
+    "ok": true,
+    "reason": null
+   },
+   "state_after": {
+    "seq": 0,
+    "day": 0,
+    "daily_spent": 0,
+    "nonce": 0,
+    "nonce_valid": false,
+    "slots_used": 2,
+    "key_loaded": true
+   }
+  },
+  {
+   "id": "prov_slot2",
+   "title": "allowlist slot 2 (D), cap 20,000.00",
+   "jumper": true,
+   "before": {},
+   "request_hex": "0202fffc90cdec1f606ec62042d16f63885d468be554d9c82a50880bb855ff741b4800000000001e848001110000000000000000000000000000000000001900",
+   "response_hex": "0002",
+   "expect": {
+    "ok": true,
+    "reason": null
+   },
+   "state_after": {
+    "seq": 0,
+    "day": 0,
+    "daily_spent": 0,
+    "nonce": 0,
+    "nonce_valid": false,
+    "slots_used": 3,
+    "key_loaded": true
+   }
+  },
+  {
+   "id": "prov_slot3_c",
+   "title": "allowlist slot 3 (C) for the per-currency happy paths",
+   "jumper": true,
+   "before": {},
+   "request_hex": "02032c6264cda4e03839300c8507186a74b42e216394218443e3bd309d7d39a83e3900000000001e84800111000000000000000000000000000000000000c9e8",
+   "response_hex": "0003",
+   "expect": {
+    "ok": true,
+    "reason": null
+   },
+   "state_after": {
+    "seq": 0,
+    "day": 0,
+    "daily_spent": 0,
+    "nonce": 0,
+    "nonce_valid": false,
+    "slots_used": 4,
+    "key_loaded": true
+   }
+  },
+  {
+   "id": "prov_daily_cap",
+   "title": "daily cap 6,000.00",
+   "jumper": true,
+   "before": {},
+   "request_hex": "02fe00000000000927c000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000038d",
+   "response_hex": "00fe",
+   "expect": {
+    "ok": true,
+    "reason": null
+   },
+   "state_after": {
+    "seq": 0,
+    "day": 0,
+    "daily_spent": 0,
+    "nonce": 0,
+    "nonce_valid": false,
+    "slots_used": 4,
+    "key_loaded": true
+   }
+  },
+  {
+   "id": "prov_nonce_timeout",
+   "title": "nonce timeout 1 day",
+   "jumper": true,
+   "before": {},
+   "request_hex": "02fc0001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000006fc9",
+   "response_hex": "00fc",
+   "expect": {
+    "ok": true,
+    "reason": null
+   },
+   "state_after": {
+    "seq": 0,
+    "day": 0,
+    "daily_spent": 0,
+    "nonce": 0,
+    "nonce_valid": false,
+    "slots_used": 4,
+    "key_loaded": true
+   }
+  },
+  {
+   "id": "prov_bad_slot",
+   "title": "provisioning slot 0x10 is malformed",
+   "jumper": true,
+   "before": {},
+   "request_hex": "02104936b2c99d5f5a2d8baad14ffbee7298a56aa6fcef764cb18fca5e32bdebeb2e00000000000000010000000000000000000000000000000000000000b1d2",
+   "response_hex": "ff09",
+   "expect": {
+    "ok": false,
+    "reason": "malformed"
+   },
+   "state_after": {
+    "seq": 0,
+    "day": 0,
+    "daily_spent": 0,
+    "nonce": 0,
+    "nonce_valid": false,
+    "slots_used": 4,
+    "key_loaded": true
+   }
+  },
+  {
+   "id": "status_provisioned",
+   "title": "status after provisioning",
+   "jumper": false,
+   "before": {},
+   "request_hex": "05000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004d56",
+   "response_hex": "0000000000000000000000000927c0000000000000000000000000004c4b400004010001",
+   "expect": {
+    "ok": true,
+    "reason": null
+   },
+   "state_after": {
+    "seq": 0,
+    "day": 0,
+    "daily_spent": 0,
+    "nonce": 0,
+    "nonce_valid": false,
+    "slots_used": 4,
+    "key_loaded": true
+   }
+  },
+  {
+   "id": "day_tick_273",
+   "title": "first day tick (2026-10-01)",
+   "jumper": false,
+   "before": {},
+   "request_hex": "0301110000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000a2db",
+   "response_hex": "0001110000000000000000",
+   "expect": {
+    "ok": true,
+    "reason": null
+   },
+   "state_after": {
+    "seq": 0,
+    "day": 273,
+    "daily_spent": 0,
+    "nonce": 0,
+    "nonce_valid": false,
+    "slots_used": 4,
+    "key_loaded": true
+   }
+  },
+  {
+   "id": "pay_eur_ok",
+   "title": "happy path EUR: 1,000.00 to A",
+   "jumper": false,
+   "before": {},
+   "request_hex": "01000000014936b2c99d5f5a2d8baad14ffbee7298a56aa6fcef764cb18fca5e32bdebeb2e00000000000186a001000000005041592d30303030303120201f99",
+   "response_hex": "0036919850f7f4d65d049600d66566786a2d6d6b4bb0de87e83b8a627d632b4cab",
+   "expect": {
+    "ok": true,
+    "reason": null
+   },
+   "state_after": {
+    "seq": 1,
+    "day": 273,
+    "daily_spent": 100000,
+    "nonce": 0,
+    "nonce_valid": false,
+    "slots_used": 4,
+    "key_loaded": true
+   }
+  },
+  {
+   "id": "pay_replay_seq",
+   "title": "replaying seq 1 is bad_seq",
+   "jumper": false,
+   "before": {},
+   "request_hex": "01000000014936b2c99d5f5a2d8baad14ffbee7298a56aa6fcef764cb18fca5e32bdebeb2e00000000000186a001000000005041592d30303030303120201f99",
+   "response_hex": "ff01",
+   "expect": {
+    "ok": false,
+    "reason": "bad_seq"
+   },
+   "state_after": {
+    "seq": 1,
+    "day": 273,
+    "daily_spent": 100000,
+    "nonce": 0,
+    "nonce_valid": false,
+    "slots_used": 4,
+    "key_loaded": true
+   }
+  },
+  {
+   "id": "pay_skip_seq",
+   "title": "skipping to seq 3 is bad_seq",
+   "jumper": false,
+   "before": {},
+   "request_hex": "01000000034936b2c99d5f5a2d8baad14ffbee7298a56aa6fcef764cb18fca5e32bdebeb2e00000000000186a001000000005041592d30303030303220207844",
+   "response_hex": "ff01",
+   "expect": {
+    "ok": false,
+    "reason": "bad_seq"
+   },
+   "state_after": {
+    "seq": 1,
+    "day": 273,
+    "daily_spent": 100000,
+    "nonce": 0,
+    "nonce_valid": false,
+    "slots_used": 4,
+    "key_loaded": true
+   }
+  },
+  {
+   "id": "pay_unknown_hash",
+   "title": "unknown account hash is not_allowlisted",
+   "jumper": false,
+   "before": {},
+   "request_hex": "0100000002339f85069d056503edab4f4fc87e144d0140fc53a58a8d801b078578272e4dff00000000000186a001000000005041592d3030303030322020b2b1",
+   "response_hex": "ff02",
+   "expect": {
+    "ok": false,
+    "reason": "not_allowlisted"
+   },
+   "state_after": {
+    "seq": 1,
+    "day": 273,
+    "daily_spent": 100000,
+    "nonce": 0,
+    "nonce_valid": false,
+    "slots_used": 4,
+    "key_loaded": true
+   }
+  },
+  {
+   "id": "pay_in_hold",
+   "title": "B is in hold until day 280",
+   "jumper": false,
+   "before": {},
+   "request_hex": "0100000002b880807d5aaa19373c5bc0a8c7780b106bb4758587148d9fe0fa2868d0a38e3300000000000186a003000000005041592d30303030303220201d9a",
+   "response_hex": "ff03",
+   "expect": {
+    "ok": false,
+    "reason": "in_hold"
+   },
+   "state_after": {
+    "seq": 1,
+    "day": 273,
+    "daily_spent": 100000,
+    "nonce": 0,
+    "nonce_valid": false,
+    "slots_used": 4,
+    "key_loaded": true
+   }
+  },
+  {
+   "id": "pay_cap_exact",
+   "title": "A at exactly its cap 2,500.00 passes",
+   "jumper": false,
+   "before": {},
+   "request_hex": "01000000024936b2c99d5f5a2d8baad14ffbee7298a56aa6fcef764cb18fca5e32bdebeb2e000000000003d09001000000005041592d3030303030322020967d",
+   "response_hex": "00d1f74db4975d02a8a97efe52a5a4f1dededddda4e63bf8550fa4110863ebc405",
+   "expect": {
+    "ok": true,
+    "reason": null
+   },
+   "state_after": {
+    "seq": 2,
+    "day": 273,
+    "daily_spent": 350000,
+    "nonce": 0,
+    "nonce_valid": false,
+    "slots_used": 4,
+    "key_loaded": true
+   }
+  },
+  {
+   "id": "pay_cap_over",
+   "title": "A one minor unit over its cap",
+   "jumper": false,
+   "before": {},
+   "request_hex": "01000000034936b2c99d5f5a2d8baad14ffbee7298a56aa6fcef764cb18fca5e32bdebeb2e000000000003d09101000000005041592d3030303030332020c62a",
+   "response_hex": "ff04",
+   "expect": {
+    "ok": false,
+    "reason": "over_account_cap"
+   },
+   "state_after": {
+    "seq": 2,
+    "day": 273,
+    "daily_spent": 350000,
+    "nonce": 0,
+    "nonce_valid": false,
+    "slots_used": 4,
+    "key_loaded": true
+   }
+  },
+  {
+   "id": "pay_daily_exact",
+   "title": "daily spent reaches exactly the daily cap",
+   "jumper": false,
+   "before": {},
+   "request_hex": "01000000034936b2c99d5f5a2d8baad14ffbee7298a56aa6fcef764cb18fca5e32bdebeb2e000000000003d09001000000005041592d3030303030332020361b",
+   "response_hex": "00c3821a0843456355a5dc23afc9505c862f2fb937718cac773c3421081eca744e",
+   "expect": {
+    "ok": true,
+    "reason": null
+   },
+   "state_after": {
+    "seq": 3,
+    "day": 273,
+    "daily_spent": 600000,
+    "nonce": 0,
+    "nonce_valid": false,
+    "slots_used": 4,
+    "key_loaded": true
+   }
+  },
+  {
+   "id": "pay_daily_over",
+   "title": "one minor unit over the daily cap",
+   "jumper": false,
+   "before": {},
+   "request_hex": "01000000044936b2c99d5f5a2d8baad14ffbee7298a56aa6fcef764cb18fca5e32bdebeb2e000000000000000101000000005041592d3030303030342020bfae",
+   "response_hex": "ff05",
+   "expect": {
+    "ok": false,
+    "reason": "over_daily_cap"
+   },
+   "state_after": {
+    "seq": 3,
+    "day": 273,
+    "daily_spent": 600000,
+    "nonce": 0,
+    "nonce_valid": false,
+    "slots_used": 4,
+    "key_loaded": true
+   }
+  },
+  {
+   "id": "day_tick_274",
+   "title": "day tick resets the daily spend",
+   "jumper": false,
+   "before": {},
+   "request_hex": "03011200000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000007f2b",
+   "response_hex": "0001120000000000000000",
+   "expect": {
+    "ok": true,
+    "reason": null
+   },
+   "state_after": {
+    "seq": 3,
+    "day": 274,
+    "daily_spent": 0,
+    "nonce": 0,
+    "nonce_valid": false,
+    "slots_used": 4,
+    "key_loaded": true
+   }
+  },
+  {
+   "id": "pay_after_tick",
+   "title": "first payment after the tick",
+   "jumper": false,
+   "before": {},
+   "request_hex": "01000000044936b2c99d5f5a2d8baad14ffbee7298a56aa6fcef764cb18fca5e32bdebeb2e000000000000000101000000005041592d3030303030342020bfae",
+   "response_hex": "00b58a84fe3824dabc7ce0a9c85a1cd464b7049622b5eed2ffa076e1f861369d34",
+   "expect": {
+    "ok": true,
+    "reason": null
+   },
+   "state_after": {
+    "seq": 4,
+    "day": 274,
+    "daily_spent": 1,
+    "nonce": 0,
+    "nonce_valid": false,
+    "slots_used": 4,
+    "key_loaded": true
+   }
+  },
+  {
+   "id": "prov_threshold",
+   "title": "button threshold 3,000.00 (jumper back in)",
+   "jumper": true,
+   "before": {},
+   "request_hex": "02fd00000000000493e000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000ae1a",
+   "response_hex": "00fd",
+   "expect": {
+    "ok": true,
+    "reason": null
+   },
+   "state_after": {
+    "seq": 4,
+    "day": 274,
+    "daily_spent": 1,
+    "nonce": 0,
+    "nonce_valid": false,
+    "slots_used": 4,
+    "key_loaded": true
+   }
+  },
+  {
+   "id": "prov_daily_cap_raised",
+   "title": "daily cap raised to 20,000.00 for the button cases",
+   "jumper": true,
+   "before": {},
+   "request_hex": "02fe00000000001e848000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000e0a5",
+   "response_hex": "00fe",
+   "expect": {
+    "ok": true,
+    "reason": null
+   },
+   "state_after": {
+    "seq": 4,
+    "day": 274,
+    "daily_spent": 1,
+    "nonce": 0,
+    "nonce_valid": false,
+    "slots_used": 4,
+    "key_loaded": true
+   }
+  },
+  {
+   "id": "pay_needs_button",
+   "title": "4,000.00 to D above the threshold without a nonce",
+   "jumper": false,
+   "before": {},
+   "request_hex": "0100000005fffc90cdec1f606ec62042d16f63885d468be554d9c82a50880bb855ff741b480000000000061a8001000000005041592d30303030303520207c53",
+   "response_hex": "ff06",
+   "expect": {
+    "ok": false,
+    "reason": "needs_button"
+   },
+   "state_after": {
+    "seq": 4,
+    "day": 274,
+    "daily_spent": 1,
+    "nonce": 0,
+    "nonce_valid": false,
+    "slots_used": 4,
+    "key_loaded": true
+   }
+  },
+  {
+   "id": "nonce_query_none",
+   "title": "no nonce loaded",
+   "jumper": false,
+   "before": {},
+   "request_hex": "0400000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000368a",
+   "response_hex": "000000000000",
+   "expect": {
+    "ok": true,
+    "reason": null
+   },
+   "state_after": {
+    "seq": 4,
+    "day": 274,
+    "daily_spent": 1,
+    "nonce": 0,
+    "nonce_valid": false,
+    "slots_used": 4,
+    "key_loaded": true
+   }
+  },
+  {
+   "id": "pay_bad_nonce",
+   "title": "wrong nonce after a button press",
+   "jumper": false,
+   "before": {
+    "press_button": 4248973237
+   },
+   "request_hex": "0100000005fffc90cdec1f606ec62042d16f63885d468be554d9c82a50880bb855ff741b480000000000061a8001deadbeef5041592d30303030303520203e33",
+   "response_hex": "ff07",
+   "expect": {
+    "ok": false,
+    "reason": "bad_nonce"
+   },
+   "state_after": {
+    "seq": 4,
+    "day": 274,
+    "daily_spent": 1,
+    "nonce": 4248973237,
+    "nonce_valid": true,
+    "slots_used": 4,
+    "key_loaded": true
+   }
+  },
+  {
+   "id": "nonce_query_loaded",
+   "title": "nonce loaded and valid",
+   "jumper": false,
+   "before": {},
+   "request_hex": "0400000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000368a",
+   "response_hex": "00fd422fb501",
+   "expect": {
+    "ok": true,
+    "reason": null
+   },
+   "state_after": {
+    "seq": 4,
+    "day": 274,
+    "daily_spent": 1,
+    "nonce": 4248973237,
+    "nonce_valid": true,
+    "slots_used": 4,
+    "key_loaded": true
+   }
+  },
+  {
+   "id": "pay_with_nonce",
+   "title": "correct nonce signs the payment",
+   "jumper": false,
+   "before": {},
+   "request_hex": "0100000005fffc90cdec1f606ec62042d16f63885d468be554d9c82a50880bb855ff741b480000000000061a8001fd422fb55041592d30303030303520200ba7",
+   "response_hex": "00e134d9ee8ca94cfdac337768dbfa5d21fa813333a3d16412e4c2ff9f276b8b69",
+   "expect": {
+    "ok": true,
+    "reason": null
+   },
+   "state_after": {
+    "seq": 5,
+    "day": 274,
+    "daily_spent": 400001,
+    "nonce": 4248973237,
+    "nonce_valid": false,
+    "slots_used": 4,
+    "key_loaded": true
+   }
+  },
+  {
+   "id": "pay_nonce_reuse",
+   "title": "the same nonce again is nonce_used",
+   "jumper": false,
+   "before": {},
+   "request_hex": "0100000006fffc90cdec1f606ec62042d16f63885d468be554d9c82a50880bb855ff741b480000000000061a8001fd422fb55041592d3030303030362020fb2c",
+   "response_hex": "ff08",
+   "expect": {
+    "ok": false,
+    "reason": "nonce_used"
+   },
+   "state_after": {
+    "seq": 5,
+    "day": 274,
+    "daily_spent": 400001,
+    "nonce": 4248973237,
+    "nonce_valid": false,
+    "slots_used": 4,
+    "key_loaded": true
+   }
+  },
+  {
+   "id": "day_tick_275",
+   "title": "day tick 275",
+   "jumper": false,
+   "before": {},
+   "request_hex": "0301130000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000c464",
+   "response_hex": "0001130000000000000000",
+   "expect": {
+    "ok": true,
+    "reason": null
+   },
+   "state_after": {
+    "seq": 5,
+    "day": 275,
+    "daily_spent": 0,
+    "nonce": 4248973237,
+    "nonce_valid": false,
+    "slots_used": 4,
+    "key_loaded": true
+   }
+  },
+  {
+   "id": "press_then_two_ticks_a",
+   "title": "button pressed on day 275, tick 276",
+   "jumper": false,
+   "before": {
+    "press_button": 1079836010
+   },
+   "request_hex": "0301140000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000d4ea",
+   "response_hex": "0001140000000000000000",
+   "expect": {
+    "ok": true,
+    "reason": null
+   },
+   "state_after": {
+    "seq": 5,
+    "day": 276,
+    "daily_spent": 0,
+    "nonce": 1079836010,
+    "nonce_valid": false,
+    "slots_used": 4,
+    "key_loaded": true
+   }
+  },
+  {
+   "id": "pay_expired_nonce",
+   "title": "a nonce older than the timeout is nonce_used",
+   "jumper": false,
+   "before": {},
+   "request_hex": "0100000006fffc90cdec1f606ec62042d16f63885d468be554d9c82a50880bb855ff741b480000000000061a8001405cfd6a5041592d303030303036202064f6",
+   "response_hex": "ff08",
+   "expect": {
+    "ok": false,
+    "reason": "nonce_used"
+   },
+   "state_after": {
+    "seq": 5,
+    "day": 276,
+    "daily_spent": 0,
+    "nonce": 1079836010,
+    "nonce_valid": false,
+    "slots_used": 4,
+    "key_loaded": true
+   }
+  },
+  {
+   "id": "pay_small_clears_nonce",
+   "title": "a payment below the threshold still consumes a fresh nonce",
+   "jumper": false,
+   "before": {
+    "press_button": 3325856070
+   },
+   "request_hex": "0100000006fffc90cdec1f606ec62042d16f63885d468be554d9c82a50880bb855ff741b4800000000000003e801000000005041592d3030303030362020b021",
+   "response_hex": "0077b0e9bbd0e2b9845a1d2bc555ba8ae14e6ba22c158360e805836c956a9c8b49",
+   "expect": {
+    "ok": true,
+    "reason": null
+   },
+   "state_after": {
+    "seq": 6,
+    "day": 276,
+    "daily_spent": 1000,
+    "nonce": 3325856070,
+    "nonce_valid": false,
+    "slots_used": 4,
+    "key_loaded": true
+   }
+  },
+  {
+   "id": "nonce_query_cleared",
+   "title": "nonce cleared by the commit",
+   "jumper": false,
+   "before": {},
+   "request_hex": "0400000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000368a",
+   "response_hex": "00c63c894600",
+   "expect": {
+    "ok": true,
+    "reason": null
+   },
+   "state_after": {
+    "seq": 6,
+    "day": 276,
+    "daily_spent": 1000,
+    "nonce": 3325856070,
+    "nonce_valid": false,
+    "slots_used": 4,
+    "key_loaded": true
+   }
+  },
+  {
+   "id": "day_tick_279",
+   "title": "day 279: B still in hold",
+   "jumper": false,
+   "before": {},
+   "request_hex": "0301170000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000091a",
+   "response_hex": "0001170000000000000000",
+   "expect": {
+    "ok": true,
+    "reason": null
+   },
+   "state_after": {
+    "seq": 6,
+    "day": 279,
+    "daily_spent": 0,
+    "nonce": 3325856070,
+    "nonce_valid": false,
+    "slots_used": 4,
+    "key_loaded": true
+   }
+  },
+  {
+   "id": "pay_hold_day_before",
+   "title": "B the day before its hold ends",
+   "jumper": false,
+   "before": {},
+   "request_hex": "0100000007b880807d5aaa19373c5bc0a8c7780b106bb4758587148d9fe0fa2868d0a38e3300000000000186a003000000005041592d30303030303720201c26",
+   "response_hex": "ff03",
+   "expect": {
+    "ok": false,
+    "reason": "in_hold"
+   },
+   "state_after": {
+    "seq": 6,
+    "day": 279,
+    "daily_spent": 0,
+    "nonce": 3325856070,
+    "nonce_valid": false,
+    "slots_used": 4,
+    "key_loaded": true
+   }
+  },
+  {
+   "id": "day_tick_280",
+   "title": "day 280: hold boundary",
+   "jumper": false,
+   "before": {},
+   "request_hex": "03011800000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000009349",
+   "response_hex": "0001180000000000000000",
+   "expect": {
+    "ok": true,
+    "reason": null
+   },
+   "state_after": {
+    "seq": 6,
+    "day": 280,
+    "daily_spent": 0,
+    "nonce": 3325856070,
+    "nonce_valid": false,
+    "slots_used": 4,
+    "key_loaded": true
+   }
+  },
+  {
+   "id": "pay_hold_boundary",
+   "title": "B on the boundary day passes",
+   "jumper": false,
+   "before": {},
+   "request_hex": "0100000007b880807d5aaa19373c5bc0a8c7780b106bb4758587148d9fe0fa2868d0a38e3300000000000186a003000000005041592d30303030303720201c26",
+   "response_hex": "006a3e197fd9f7c42a6e84b045e08f7c959d286aae49df513133440497e0bd9397",
+   "expect": {
+    "ok": true,
+    "reason": null
+   },
+   "state_after": {
+    "seq": 7,
+    "day": 280,
+    "daily_spent": 100000,
+    "nonce": 3325856070,
+    "nonce_valid": false,
+    "slots_used": 4,
+    "key_loaded": true
+   }
+  },
+  {
+   "id": "pay_pln",
+   "title": "happy path PLN",
+   "jumper": false,
+   "before": {},
+   "request_hex": "01000000082c6264cda4e03839300c8507186a74b42e216394218443e3bd309d7d39a83e39000000000000c35002000000005041592d3030303030382020b944",
+   "response_hex": "002325f3a73515fa15861e8b2c174a14d46dad646ec1c21b23e82961a4aeb71636",
+   "expect": {
+    "ok": true,
+    "reason": null
+   },
+   "state_after": {
+    "seq": 8,
+    "day": 280,
+    "daily_spent": 150000,
+    "nonce": 3325856070,
+    "nonce_valid": false,
+    "slots_used": 4,
+    "key_loaded": true
+   }
+  },
+  {
+   "id": "pay_czk",
+   "title": "happy path CZK",
+   "jumper": false,
+   "before": {},
+   "request_hex": "01000000092c6264cda4e03839300c8507186a74b42e216394218443e3bd309d7d39a83e39000000000000c35003000000005041592d303030303039202009c0",
+   "response_hex": "003bafb0d4c92b93ee4ec672641526c31cc4b99d9699ee9fc637baa0d0c68b5606",
+   "expect": {
+    "ok": true,
+    "reason": null
+   },
+   "state_after": {
+    "seq": 9,
+    "day": 280,
+    "daily_spent": 200000,
+    "nonce": 3325856070,
+    "nonce_valid": false,
+    "slots_used": 4,
+    "key_loaded": true
+   }
+  },
+  {
+   "id": "pay_jpy",
+   "title": "happy path JPY",
+   "jumper": false,
+   "before": {},
+   "request_hex": "010000000a2c6264cda4e03839300c8507186a74b42e216394218443e3bd309d7d39a83e39000000000000c35004000000005041592d30303030313020203a90",
+   "response_hex": "00d9377908d2ed31f18bb39c3d4e8d3bb2bf92277ef5fea4b73fa742d554f5022d",
+   "expect": {
+    "ok": true,
+    "reason": null
+   },
+   "state_after": {
+    "seq": 10,
+    "day": 280,
+    "daily_spent": 250000,
+    "nonce": 3325856070,
+    "nonce_valid": false,
+    "slots_used": 4,
+    "key_loaded": true
+   }
+  },
+  {
+   "id": "pay_usd",
+   "title": "happy path USD",
+   "jumper": false,
+   "before": {},
+   "request_hex": "010000000b2c6264cda4e03839300c8507186a74b42e216394218443e3bd309d7d39a83e39000000000000c35005000000005041592d30303030313120208a14",
+   "response_hex": "0035bab18de52b06c1e1cd83c0621326c97c579d97b66abc1b846ec754b332b388",
+   "expect": {
+    "ok": true,
+    "reason": null
+   },
+   "state_after": {
+    "seq": 11,
+    "day": 280,
+    "daily_spent": 300000,
+    "nonce": 3325856070,
+    "nonce_valid": false,
+    "slots_used": 4,
+    "key_loaded": true
+   }
+  },
+  {
+   "id": "malformed_short",
+   "title": "63-byte frame is malformed",
+   "jumper": false,
+   "before": {},
+   "request_hex": "010000000c4936b2c99d5f5a2d8baad14ffbee7298a56aa6fcef764cb18fca5e32bdebeb2e000000000000000101000000005041592d3030303030312020ae",
+   "response_hex": "ff09",
+   "expect": {
+    "ok": false,
+    "reason": "malformed"
+   },
+   "state_after": {
+    "seq": 11,
+    "day": 280,
+    "daily_spent": 300000,
+    "nonce": 3325856070,
+    "nonce_valid": false,
+    "slots_used": 4,
+    "key_loaded": true
+   }
+  },
+  {
+   "id": "malformed_type",
+   "title": "unknown frame type 0x09",
+   "jumper": false,
+   "before": {},
+   "request_hex": "09000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000005c84",
+   "response_hex": "ff09",
+   "expect": {
+    "ok": false,
+    "reason": "malformed"
+   },
+   "state_after": {
+    "seq": 11,
+    "day": 280,
+    "daily_spent": 300000,
+    "nonce": 3325856070,
+    "nonce_valid": false,
+    "slots_used": 4,
+    "key_loaded": true
+   }
+  },
+  {
+   "id": "malformed_currency",
+   "title": "unknown currency code 0x07",
+   "jumper": false,
+   "before": {},
+   "request_hex": "010000000c4936b2c99d5f5a2d8baad14ffbee7298a56aa6fcef764cb18fca5e32bdebeb2e000000000000000107000000005041592d3030303031322020e3c2",
+   "response_hex": "ff09",
+   "expect": {
+    "ok": false,
+    "reason": "malformed"
+   },
+   "state_after": {
+    "seq": 11,
+    "day": 280,
+    "daily_spent": 300000,
+    "nonce": 3325856070,
+    "nonce_valid": false,
+    "slots_used": 4,
+    "key_loaded": true
+   }
+  },
+  {
+   "id": "malformed_pay_id",
+   "title": "non-ASCII pay_id",
+   "jumper": false,
+   "before": {},
+   "request_hex": "010000000c4936b2c99d5f5a2d8baad14ffbee7298a56aa6fcef764cb18fca5e32bdebeb2e000000000000000101000000000041592d30303030313220206b9e",
+   "response_hex": "ff09",
+   "expect": {
+    "ok": false,
+    "reason": "malformed"
+   },
+   "state_after": {
+    "seq": 11,
+    "day": 280,
+    "daily_spent": 300000,
+    "nonce": 3325856070,
+    "nonce_valid": false,
+    "slots_used": 4,
+    "key_loaded": true
+   }
+  },
+  {
+   "id": "bad_crc",
+   "title": "corrupted CRC",
+   "jumper": false,
+   "before": {},
+   "request_hex": "010000000c4936b2c99d5f5a2d8baad14ffbee7298a56aa6fcef764cb18fca5e32bdebeb2e000000000000000101000000005041592d3030303031322020818f",
+   "response_hex": "ff0a",
+   "expect": {
+    "ok": false,
+    "reason": "bad_crc"
+   },
+   "state_after": {
+    "seq": 11,
+    "day": 280,
+    "daily_spent": 300000,
+    "nonce": 3325856070,
+    "nonce_valid": false,
+    "slots_used": 4,
+    "key_loaded": true
+   }
+  },
+  {
+   "id": "seq_unchanged_after_rejects",
+   "title": "seq 12 still next after all the rejects",
+   "jumper": false,
+   "before": {},
+   "request_hex": "010000000c4936b2c99d5f5a2d8baad14ffbee7298a56aa6fcef764cb18fca5e32bdebeb2e000000000000000101000000005041592d3030303031322020818e",
+   "response_hex": "0088816e98f5de8a8fdba4dcbae822fefad431ebab4ded5b51868fdc78d5be1903",
+   "expect": {
+    "ok": true,
+    "reason": null
+   },
+   "state_after": {
+    "seq": 12,
+    "day": 280,
+    "daily_spent": 300001,
+    "nonce": 3325856070,
+    "nonce_valid": false,
+    "slots_used": 4,
+    "key_loaded": true
+   }
+  },
+  {
+   "id": "prov_locked_after_pull",
+   "title": "provisioning locked once the jumper is pulled",
+   "jumper": false,
+   "before": {},
+   "request_hex": "0204339f85069d056503edab4f4fc87e144d0140fc53a58a8d801b078578272e4dff000000000000000100000000000000000000000000000000000000005824",
+   "response_hex": "ff0b",
+   "expect": {
+    "ok": false,
+    "reason": "provisioning_locked"
+   },
+   "state_after": {
+    "seq": 12,
+    "day": 280,
+    "daily_spent": 300001,
+    "nonce": 3325856070,
+    "nonce_valid": false,
+    "slots_used": 4,
+    "key_loaded": true
+   }
+  },
+  {
+   "id": "status_final",
+   "title": "final status",
+   "jumper": false,
+   "before": {},
+   "request_hex": "05000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004d56",
+   "response_hex": "000000000c011800000000001e848000000000000493e100000000000493e00004010001",
+   "expect": {
+    "ok": true,
+    "reason": null
+   },
+   "state_after": {
+    "seq": 12,
+    "day": 280,
+    "daily_spent": 300001,
+    "nonce": 3325856070,
+    "nonce_valid": false,
+    "slots_used": 4,
+    "key_loaded": true
+   }
+  }
+ ]
+}

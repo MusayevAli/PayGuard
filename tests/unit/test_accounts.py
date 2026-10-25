@@ -18,16 +18,17 @@ from core.accounts import (
 ROOT = Path(__file__).resolve().parents[2]
 SPEC_CHART = """Assets:Bank:EUR  Assets:Bank:CZK  Assets:Bank:PLN
 Assets:Prepayments
-Liabilities:AP  Liabilities:AP:Retention  Liabilities:GRNI  Liabilities:VAT:Output
+Liabilities:AP  Liabilities:AP:Retention  Liabilities:GRNI  Liabilities:VAT:Output  Liabilities:Intercompany
 Expenses:Materials:Frames  Expenses:Materials:Foam  Expenses:Materials:Trim
 Expenses:Materials:Mechanisms  Expenses:Materials:Harness  Expenses:Materials:Fasteners
 Expenses:Tooling  Expenses:Freight  Expenses:VAT:Input  Expenses:Bank:Fees  Expenses:FX:Rounding  Expenses:FX:Realized
+Income:Discounts
 Equity:Opening"""
 
 
 def test_chart_matches_the_spec_verbatim() -> None:
     assert tuple(SPEC_CHART.split()) == CHART
-    assert len(set(CHART)) == 21
+    assert len(set(CHART)) == 23
     spec = (ROOT / "spec" / "PAYGUARD_SPEC.md").read_text(encoding="utf-8")
     assert SPEC_CHART in spec
 

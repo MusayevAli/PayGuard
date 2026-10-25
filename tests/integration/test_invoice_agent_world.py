@@ -23,6 +23,7 @@ def test_world_run_through_november_5(world_dir: Path, tmp_path: Path) -> None:
         world_dir,
         tmp_path / "run",
         until="2026-11-05",
+        agents=("invoice",),
         cache_db=world_dir.parent / "extraction_cache.db",
     )
     report = result.report

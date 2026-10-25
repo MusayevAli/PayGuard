@@ -58,10 +58,11 @@ Chart of accounts (`core/accounts.py`; posting to any other account is rejected)
 ```
 Assets:Bank:EUR  Assets:Bank:CZK  Assets:Bank:PLN
 Assets:Prepayments
-Liabilities:AP  Liabilities:AP:Retention  Liabilities:GRNI  Liabilities:VAT:Output
+Liabilities:AP  Liabilities:AP:Retention  Liabilities:GRNI  Liabilities:VAT:Output  Liabilities:Intercompany
 Expenses:Materials:Frames  Expenses:Materials:Foam  Expenses:Materials:Trim
 Expenses:Materials:Mechanisms  Expenses:Materials:Harness  Expenses:Materials:Fasteners
 Expenses:Tooling  Expenses:Freight  Expenses:VAT:Input  Expenses:Bank:Fees  Expenses:FX:Rounding  Expenses:FX:Realized
+Income:Discounts
 Equity:Opening
 ```
 
@@ -393,7 +394,14 @@ PRINCIPALS = {
         post=set(), request_payment=False, edit_vendor=True, edit_allowlist=False
     ),
     "payment_agent": Scope(
-        post={"Assets:Bank:*", "Liabilities:AP*", "Expenses:Bank:*", "Expenses:FX:*"},
+        post={
+            "Assets:Bank:*",
+            "Liabilities:AP*",
+            "Liabilities:Intercompany",
+            "Expenses:Bank:*",
+            "Expenses:FX:*",
+            "Income:Discounts",
+        },
         request_payment=True,
         edit_vendor=False,
         edit_allowlist=False,

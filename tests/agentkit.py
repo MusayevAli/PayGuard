@@ -14,19 +14,26 @@ from typing import Any
 from agents.invoice_agent import InvoiceAgent
 from agents.llm import template_explanation, template_message
 from agents.parsed import ExtractionFailure, ParsedBankDetails, ParsedInvoice, ParsedLine
+from agents.payment_agent import PaymentAgent
+from agents.payment_state import PaymentState
 from agents.runner import Runner
+from agents.runtime import JumperFlag
 from agents.state import AgentState
+from bank.mock_bank import MockBank
+from core.accounts import expense_account_for_category
 from core.events import EventStore, make_event
-from core.ledger import JournalEntry, Ledger
+from core.ledger import Evidence, JournalEntry, JournalEntryDraft, JournalLineDraft, Ledger, Payable
 from core.packets import PacketStore
-from core.policy import Policy
-from core.rules import applicable_price_list
+from core.policy import Policy, PostAction
+from core.rules import BUTTON_THRESHOLD_MINOR, DAILY_CAP_EUR_MINOR, applicable_price_list
 from core.vendors import VendorMaster
+from signer.provisioning import DEV_CHIP_KEY, Provisioner
+from signer.stub import StubSigner
 from sim.clock import SimClock
 from sim.fx import DayRates, FxTable, SourceWindow
 from sim.models import Event, GoodsReceipt, POLine, PurchaseOrder, Supplier
 from sim.people import Responders, roster
-from sim.worldgen.catalog import SKUS
+from sim.worldgen.catalog import BANK_ACCOUNTS, SKUS
 from sim.worldgen.suppliers import build_suppliers
 
 RETENTION_NOTE = "10 % retention on the invoice total, released after final tool acceptance."
@@ -100,7 +107,18 @@ class FakeLLM:
 
 
 class Kit:
-    def __init__(self, tmp_path: Path, *, now: datetime = START) -> None:
+    def __init__(
+        self,
+        tmp_path: Path,
+        *,
+        now: datetime = START,
+        payments: bool = False,
+        bank_opening: dict[str, int] | None = None,
+        button_threshold: int = BUTTON_THRESHOLD_MINOR,
+        daily_cap: int = DAILY_CAP_EUR_MINOR,
+    ) -> None:
+        self.jumper = JumperFlag(False)
+        self.payments_enabled = payments
         self.world = tmp_path / "world"
         (self.world / "invoices").mkdir(parents=True)
         self.suppliers: list[Supplier] = build_suppliers(42)
@@ -122,7 +140,7 @@ class Kit:
             ledger=self.ledger,
             vendors=self.vendors,
             events=self.store,
-            jumper_present=lambda: False,
+            jumper_present=self.jumper,
             now=lambda: self.clock.sim_now,
         )
         self.state = AgentState(self.db)
@@ -142,22 +160,224 @@ class Kit:
             suppliers=self.suppliers,
             now=lambda: self.clock.sim_now,
         )
+        self.fx = full_synthetic_fx()
+        self.signer = StubSigner(None, jumper_present=self.jumper, nonce_seed=5)
+        self.bank = MockBank(
+            self.db,
+            store=self.store,
+            key=DEV_CHIP_KEY,
+            fx=self.fx,
+            now=lambda: self.clock.sim_now,
+            schedule=self.clock.schedule,
+            out_dir=tmp_path,
+            opening=bank_opening,
+        )
+        self.pay_state = PaymentState(self.db)
+        self.provisioner = Provisioner(
+            self.db,
+            signer=self.signer,
+            vendors=self.vendors,
+            policy=self.policy,
+            store=self.store,
+            now=lambda: self.clock.sim_now,
+            jumper_present=self.jumper,
+            key=DEV_CHIP_KEY,
+        )
+        self._button_threshold = button_threshold
+        self._daily_cap = daily_cap
+        self.payment_agent = PaymentAgent(
+            store=self.store,
+            ledger=self.ledger,
+            vendors=self.vendors,
+            packets=self.packets,
+            state=self.pay_state,
+            invoice_state=self.state,
+            signer=self.signer,
+            bank=self.bank,
+            fx=self.fx,
+            now=lambda: self.clock.sim_now,
+            provisioner=self.provisioner,
+        )
+        agents: list[Any] = [self.agent] + ([self.payment_agent] if payments else [])
         self.runner = Runner(
             store=self.store,
             policy=self.policy,
-            agents=[self.agent],
+            agents=agents,
             now=lambda: self.clock.sim_now,
             explainer=self.llm,
             messenger=self.responders,
         )
         self.runner.attach(self.clock)
+        if payments:
+            self.provision()
         self._po_n = 20000
         self._gr_n = 9000
         self._inv_n = 9000
 
+    # -- payment desk helpers -----------------------------------------------------------------
+    def provision(self, *vendor_ids: str) -> list[Event]:
+        """Key, caps and the given vendors' accounts onto the stub with the jumper present."""
+        self.jumper.present = True
+        try:
+            out = []
+            if not self.signer.status().key_loaded:
+                out.extend(
+                    self.provisioner.load_key_and_caps(
+                        daily_cap=self._daily_cap, button_threshold=self._button_threshold
+                    )
+                )
+            out.extend(self.provisioner.enqueue(v) for v in vendor_ids)
+            return out
+        finally:
+            self.jumper.present = False
+
+    def payable(
+        self,
+        vendor_id: str,
+        amount_minor: int,
+        *,
+        due: date,
+        currency: str | None = None,
+        discount_bp: int = 0,
+        discount_deadline: date | None = None,
+        number: str | None = None,
+        inv_id: str | None = None,
+        status: str = "open",
+        held_reason: str | None = None,
+    ) -> Payable:
+        """An AP liability with its payable, posted as the invoice agent would (evidence: a controller decision event)."""
+        sup = self.by_id[vendor_id]
+        currency = currency or sup.currency
+        self._inv_n += 1
+        inv_id = inv_id or f"INV-{self._inv_n}"
+        number = number or f"TST-{self._inv_n}"
+        evidence_ev = self.store.append(
+            make_event(
+                "controller_decision",
+                {
+                    "packet_id": f"TEST-{inv_id}",
+                    "decision": "test_payable",
+                    "note": number,
+                    "decided_by": "test",
+                    "via": "api",
+                },
+                event_time=self.now,
+                source="test",
+                actor="test",
+            )
+        ).event
+        expense = expense_account_for_category(sup.category)
+        lines = (
+            [
+                JournalLineDraft(account=expense, debit_minor=amount_minor, currency=currency),
+                JournalLineDraft(
+                    account="Liabilities:AP", credit_minor=amount_minor, currency=currency
+                ),
+            ]
+            if amount_minor >= 0
+            else [
+                JournalLineDraft(
+                    account="Liabilities:AP", debit_minor=-amount_minor, currency=currency
+                ),
+                JournalLineDraft(account=expense, credit_minor=-amount_minor, currency=currency),
+            ]
+        )
+        draft = JournalEntryDraft(
+            effective_date=self.now.date(),
+            description=f"Test invoice {number} {sup.legal_name}",
+            cause_type="invoice" if amount_minor >= 0 else "credit_note",
+            cause_id=inv_id,
+            lines=lines,
+            evidence=[Evidence(event_id=evidence_ev.id, role="decision")],
+        )
+        entry = self.policy.execute(PostAction(draft=draft, posted_at=self.now), "invoice_agent")
+        self.state.set_invoice(
+            inv_id,
+            "posted",
+            rule_id=None,
+            reason=None,
+            now=self.now,
+            invoice_number=number,
+            vendor_id=vendor_id,
+            entry_id=entry.id,
+        )
+        return self.ledger.create_payable(
+            vendor_id=vendor_id,
+            inv_id=inv_id,
+            entry_id=entry.id,
+            amount_minor=amount_minor,
+            currency=currency,
+            due_date=due,
+            discount_deadline=discount_deadline,
+            discount_bp=discount_bp,
+            status=status,
+            held_reason=held_reason,
+        )  # type: ignore[arg-type]
+
+    def bank_line(
+        self,
+        currency: str,
+        value_date: date,
+        dc: str,
+        amount_minor: int,
+        *,
+        customer_ref: str,
+        remittance: str,
+        txn_type: str = "NTRF",
+        known_at: datetime | None = None,
+        line_no: int = 1,
+    ) -> Event:
+        """A world-style statement line (known the next morning at 06:00 unless given)."""
+        known = known_at or (at(value_date, 6) + timedelta(days=1))
+        payload = {
+            "statement_id": f"{currency}{value_date:%y%m%d}",
+            "account_iban": BANK_ACCOUNTS[currency]["iban"],
+            "currency": currency,
+            "line_no": line_no,
+            "value_date": value_date.isoformat(),
+            "entry_date": value_date.isoformat(),
+            "dc": dc,
+            "amount_minor": amount_minor,
+            "txn_type": txn_type,
+            "customer_ref": customer_ref,
+            "bank_ref": None,
+            "remittance": remittance[:140],
+        }
+        return self._append(
+            make_event(
+                "bank_statement_line",
+                payload,
+                event_time=at(value_date, 12),
+                known_at=known,
+                source="bank",
+                actor=BANK_ACCOUNTS[currency]["bic"],
+            )
+        )
+
+    def decide(self, packet_id: str, decision: str) -> None:
+        self.packets.decide_packet(
+            packet_id, decision, None, "controller", via="phone", decided_at=self.now
+        )
+        self.run()
+
+    def press_button(self) -> int:
+        nonce = self.signer.press_button()
+        self.runner.run_task(self.payment_agent, self.payment_agent.retry_waiting)
+        return nonce
+
+    def packets_open(self, kind: str | None = None) -> list[Event]:
+        return [
+            e
+            for e in self.store.query(type="escalation", limit=100000)
+            if kind is None or e.payload.get("kind") == kind
+        ]
+
     def close(self) -> None:
         self.ledger.close()
         self.vendors.close()
+        self.pay_state.close()
+        self.bank.close()
+        self.provisioner.close()
         self.packets.close()
         self.state.close()
         self.store.close()

@@ -17,6 +17,9 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validato
 from core.events import EventStore, canonical_json, make_event
 
 Severity = Literal["info", "action", "urgent"]
+PacketKind = Literal["anomaly", "approval", "notice"]
+"""anomaly: the desk suspects something is wrong; approval: a routine control step (button, bank
+change); notice: information for another desk. Only anomalies count as false positives."""
 PacketStatus = Literal["open", "decided", "expired"]
 
 SCHEMA = """
@@ -60,6 +63,7 @@ class PacketDraft(BaseModel):
     expires_at: AwareDatetime | None
     auto_action_on_expiry: Literal["hold"] = "hold"
     consequence_of_silence: str
+    kind: PacketKind = "anomaly"
 
     @model_validator(mode="after")
     def _recommendation_is_an_option(self) -> PacketDraft:
@@ -153,6 +157,7 @@ class PacketStore:
             "options": [o.id for o in draft.options],
             "expires_at": _iso(draft.expires_at) if draft.expires_at else None,
             "auto_action_on_expiry": draft.auto_action_on_expiry,
+            "kind": draft.kind,
         }
         event = self._events.append(
             make_event("escalation", payload, event_time=when, source="agent", actor=draft.agent)

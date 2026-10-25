@@ -198,3 +198,75 @@ Choices the spec left open, with the reasoning. Newest at the bottom of each par
     3 days are *not* duplicates when they name different purchase orders or bill disjoint SKUs (the
     world has such coincidences); the spec's three tests remain necessary, this adds a sufficient
     "same supply" condition. A15 (±0.3 % total, same PO) is still rejected.
+
+## Part 4 — frames, signer stub, bank, payment agent
+
+54. **The pay frame carries the EUR-equivalent amount.** The frame has one amount field and the chip's
+    caps are EUR-equivalent (spec §10.2), so the host converts the settlement amount at the request
+    date (`Money.convert`, logged on `payment_requested` as `eur_equiv_minor`, `fx_rate`, `rate_date`)
+    and frames that; the currency byte names the settlement currency. The bank settles the native
+    amount recorded on the latest `payment_requested` for the frame's pay_id and checks that the
+    frame's hash, EUR amount and currency match it. For EUR payments frame and settlement coincide.
+55. **One reason from the chip, annotations from the host.** The response is `FF` + one reason byte and
+    the check order stops at the first failure, so a never-provisioned account can only be
+    `not_allowlisted`. T8's `not_allowlisted` + `in_hold` reading comes from the host appending
+    `in_hold` to `chip_response.reasons` when the paying account's hold has not elapsed.
+56. **Check order and nonce semantics** are in `proto/FRAME.md`: length/type/currency/pay_id → CRC →
+    (provision: jumper → slot) → seq → allowlist → hold → account cap → daily cap → button → nonce
+    value → nonce valid → commit → HMAC. Any successful payment clears the nonce (a press authorises
+    exactly one payment); a nonce also expires after `nonce_timeout_days` day ticks. `day` is days
+    since 2026-01-01; seeded accounts' holds clamp to day 0.
+57. **Provisioning extras.** Besides the spec's slot/`0xFE`/`0xFF` sub-formats, `0xFD` sets the button
+    threshold and `0xFC` the nonce timeout. Defaults: per-account cap EUR 2,500,000.00, daily cap
+    EUR 3,000,000.00, threshold EUR 50,000.00, timeout 1 day. `DEMO_VENDORS` are the 14 vendors with
+    the largest EUR-equivalent payables falling due in the window (an operator list, not agent
+    logic), leaving two free slots for T7. The shared HMAC key is `PAYGUARD_CHIP_KEY` (hex) or a fixed
+    development key.
+58. **Stub state persists in SQLite** when a path is given (the API survives restarts without losing
+    the allowlist); the vector generator uses an in-memory stub. `tests/vectors.json` schema
+    `payguard-vectors-1` is frozen; a case may carry `before.press_button` with the nonce the
+    testbench must load.
+59. **Bank balances** = the world's last statement closing + the runtime delta of executed payments and
+    arranged credits; the bank's own statements (`<CCY>yymmddP`, sequence 1000 + day) carry only
+    runtime lines and open at the cumulative runtime delta. A world statement that does not open at
+    the previous closing raises `system_error{statement_gap}`. `bank_rejected` is a new event type
+    (bad tag, unknown payment, frame mismatch, insufficient funds, FX unavailable). USD and JPY
+    payments settle from the EUR account at the day's ECB rate.
+60. **The payment run is a morning run.** It executes when all three accounts' statements for the day
+    have been ingested (06:00), so cash is yesterday's closing; the day boundary runs it only on a
+    desk that has never received a statement (the unit-test kit). The harness advances to 06:30 and
+    then to midnight each day. Without this, the desk would see balances two days old.
+61. **Eligibility.** Open payables due within `PAY_LEAD_DAYS = 2`; discounts on their deadline day
+    (`DISCOUNT_LEAD_DAYS = 0`, the latest value date that still earns them, which is also when T9's
+    cash picture is visible); `scheduled` means already instructed to the bank, so the three legacy
+    payables are created `scheduled` by the bootstrap and settle only through the batch line;
+    retention payables are never scheduled; credit notes net against the next payment to the vendor
+    (`Dr AP` for the net amount). Payments beyond cash or the daily cap are deferred, not held.
+62. **Payables are `paid` at execution**, when `Dr AP / Cr Bank` posts, so `ap_control_reconciles()`
+    holds every day; the next-day statement line confirms the settlement (`reconciled`, payment
+    `settled`). Spec §7.5's "mark paid on the statement line" would leave the liability and the
+    payable out of step for a day.
+63. **R10.** `needs_button` → `payment_held` + an approval packet (`kind=approval`). Approval moves the
+    payment to `awaiting_button`; the button (`POST /stub/button`, which also re-runs waiting payments
+    through `Runner.run_task`) supplies the nonce and the same pay_id is re-sent with a new seq.
+    Rejection holds the payables `rejected_by_controller`. A chip reject is never retried on its own.
+64. **T9 options** are quantified in EUR: pay what cash allows now (discount prorated to the covered
+    part, the rest at due date), draw the shortfall intercompany at `INTERCOMPANY_RATE_BP = 400` until
+    the due date (`Dr Assets:Bank / Cr Liabilities:Intercompany`), or skip the discount; the
+    recommendation is the largest net benefit. Taking a discount credits `Income:Discounts`. Both
+    accounts were added to the chart (spec §2.1) and to the payment agent's scope.
+65. **Reconciliation.** Lines match a payment by `customer_ref = pay_id`; a debit whose remittance names
+    open or scheduled payables summing to the amount is a batch (`Dr AP / Cr Bank`, payables paid);
+    `NCHG` debits are fees; `NFEX` legs pair by reference across currencies into one entry with
+    `Expenses:FX:Realized` beyond one cent; everything else becomes an informational packet
+    (`kind=notice`, `severity=info`) per statement two days after the line became known. Packets
+    gained a `kind` (anomaly | approval | notice); only anomalies count as false positives.
+    `ActionType` gained `payment_requested` and `reconciled`; `EvidenceRole` gained the payment and
+    statement roles.
+66. **Unprovisioned vendors** are rejected by the chip (`02`), their payables held
+    `not_allowlisted`, and the vendor is queued for provisioning (`provisioning{ok:false,
+    reason:jumper_absent}`); a later successful provisioning event reopens those payables. With 16
+    slots and 20 vendors due in the window, six vendors wait this way.
+67. **API.** `create_app(desk=False)` is the bare clock/transport server the Part 1 tests exercise;
+    the full app builds the runtime, bootstraps and provisions at startup. `SIGNER=hw` is refused with
+    a message until Part 7.

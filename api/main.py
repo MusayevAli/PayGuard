@@ -81,12 +81,36 @@ def create_app(
     autostart: bool = False,
     ping_interval: float = 15.0,
     start: datetime = SIM_START,
+    llm: Any | None = None,
+    provision: bool = True,
+    desk: bool = True,
 ) -> FastAPI:
+    signer_kind = os.environ.get("SIGNER", "stub")
+    if signer_kind != "stub":
+        raise RuntimeError(
+            f"SIGNER={signer_kind!r}: the hardware client arrives in Part 7; only the stub signer exists"
+        )
     store = EventStore(db_path)
     world_events = load_world_events(Path(world_dir) / "world.jsonl")
     clock = SimClock(store, world_events, start=start, speed=speed)
     hub = LiveHub(store)
     idem = IdempotencyCache()
+    from agents.runtime import Runtime, build_runtime, start_runtime
+    from signer.provisioning import DEMO_VENDORS
+
+    runtime: Runtime | None = None
+    if desk:
+        out_dir = Path(db_path).resolve().parent / "runtime"
+        runtime = build_runtime(
+            world_dir=Path(world_dir),
+            db_path=Path(db_path),
+            store=store,
+            clock=clock,
+            out_dir=out_dir,
+            world_events=world_events,
+            llm=llm,
+        )
+        start_runtime(runtime, provision=DEMO_VENDORS if provision else None)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -105,7 +129,10 @@ def create_app(
         finally:
             clock.stop_loop()
             hub.close()
-            store.close()
+            if runtime is not None:
+                runtime.close()
+            else:
+                store.close()
 
     app = FastAPI(title="PayGuard", version="0.1.0", lifespan=lifespan)
     app.state.store, app.state.clock, app.state.hub = store, clock, hub
@@ -241,6 +268,61 @@ def create_app(
     @app.websocket("/live")
     async def live(ws: WebSocket) -> None:
         await live_endpoint(ws, store=store, clock=clock, hub=hub, ping_interval=ping_interval)
+
+    if runtime is None:
+        return app
+    desk_rt: Runtime = runtime
+
+    @app.get("/chip/status")
+    async def chip_status() -> dict[str, Any]:
+        return {
+            **desk_rt.signer.status().to_json(),
+            "slots_host": desk_rt.provisioner.slots(),
+            "provisioning_queue": desk_rt.provisioner.queued(),
+        }
+
+    @app.post("/stub/button")
+    async def stub_button(request: Request) -> JSONResponse:
+        if signer_kind != "stub" or not hasattr(desk_rt.signer, "press_button"):
+            raise ApiError(
+                404,
+                "not_found",
+                "the button is physical on the hardware signer",
+                "press the button on the device; this route exists only with SIGNER=stub",
+            )
+
+        def compute() -> tuple[int, Any]:
+            nonce = desk_rt.signer.press_button()  # type: ignore[attr-defined]
+            resent = 0
+            if desk_rt.payment_agent is not None:
+                agent = desk_rt.payment_agent
+                resent = desk_rt.runner.run_task(agent, agent.retry_waiting) or 0
+            log.info("button_pressed", nonce=nonce, resent=resent)
+            return 200, {
+                "nonce": nonce,
+                "nonce_valid": desk_rt.signer.nonce() is not None,
+                "payments_resent": resent,
+            }
+
+        status, payload = idem.run(request, compute)
+        return JSONResponse(status_code=status, content=payload)
+
+    @app.get("/payables")
+    async def payables(status: str | None = Query(default=None)) -> dict[str, Any]:
+        valid = ("open", "scheduled", "paid", "held", "rejected", "netted")
+        if status is not None and status not in valid:
+            raise ApiError(
+                400,
+                "validation_error",
+                f"unknown payable status {status!r}",
+                "use one of: " + ", ".join(valid),
+            )
+        rows = desk_rt.ledger.payables(status=status)  # type: ignore[arg-type]
+        return {"payables": [p.model_dump(mode="json") for p in rows], "count": len(rows)}
+
+    @app.get("/bank/accounts")
+    async def bank_accounts() -> dict[str, Any]:
+        return {"accounts": desk_rt.bank.accounts()}
 
     return app
 
