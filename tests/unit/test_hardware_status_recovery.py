@@ -24,6 +24,7 @@ from tests.unit.test_hardware_signer import ACCOUNT, ExplicitModelTransport, mak
 
 SERIAL_TIMEOUT = "serial response timeout; do not reissue payment"
 OLD_LOCK_PREFIX = "uncertain hardware transaction; do not retry or reset: "
+OVERWRITTEN_LOCK = "unfinished hardware transaction; reconcile journals before restarting"
 
 
 def old_pending_read(signer, *, frame=None, reason=SERIAL_TIMEOUT):
@@ -121,6 +122,80 @@ def test_old_timeout_lock_reconciles_only_by_new_authenticated_status(tmp_path):
         ).fetchone()[0]
         == 0
     )
+
+
+def test_overwritten_startup_lock_requires_retained_status_timeout_evidence(tmp_path):
+    path = tmp_path / "state.db"
+    signer, transport = make_signer(path)
+    old_pending_read(signer)
+    signer._con.execute(
+        "UPDATE pg_hw_journal SET error=? WHERE state='pending'",
+        ("TransportError: " + SERIAL_TIMEOUT,),
+    )
+    signer._state["lock_reason"] = OVERWRITTEN_LOCK
+    signer._save_state()
+    signer.close()
+    before = len(transport.requests)
+    reopened, _ = make_signer(path, transport)
+    assert [frame.op for frame, _ in transport.requests[before:]] == [Op.STATUS]
+    assert not reopened._state["locked"]
+    assert (
+        reopened._con.execute(
+            "SELECT count(*) FROM pg_hw_journal WHERE state='read_reconciled'"
+        ).fetchone()[0]
+        == 1
+    )
+
+
+@pytest.mark.parametrize(
+    "error", [None, "", "HardwareLocked: invalid response MAC", "unexpected process interruption"]
+)
+def test_overwritten_lock_without_proven_timeout_remains_locked(tmp_path, error):
+    path = tmp_path / "state.db"
+    signer, transport = make_signer(path)
+    old_pending_read(signer)
+    signer._con.execute("UPDATE pg_hw_journal SET error=? WHERE state='pending'", (error,))
+    signer._state["lock_reason"] = OVERWRITTEN_LOCK
+    signer._save_state()
+    signer.close()
+    before = len(transport.requests)
+    with pytest.raises(HardwareLocked, match="unfinished hardware transaction"):
+        make_signer(path, transport)
+    assert len(transport.requests) == before
+
+
+def test_overwritten_lock_does_not_recover_mutation_even_with_timeout_error(tmp_path):
+    path = tmp_path / "state.db"
+    signer, transport = make_signer(path)
+    old_pending_read(signer, frame=command(Op.PAY, session=signer.session, currency=978))
+    signer._con.execute(
+        "UPDATE pg_hw_journal SET error=? WHERE state='pending'",
+        ("TransportError: " + SERIAL_TIMEOUT,),
+    )
+    signer._state["lock_reason"] = OVERWRITTEN_LOCK
+    signer._save_state()
+    signer.close()
+    before = len(transport.requests)
+    with pytest.raises(HardwareLocked, match="unfinished hardware transaction"):
+        make_signer(path, transport)
+    assert len(transport.requests) == before
+
+
+def test_integrity_failure_remains_recorded_after_startup_overwrites_lock(tmp_path):
+    path = tmp_path / "state.db"
+    signer, transport = make_signer(path)
+    transport.bad_mac = True
+    with pytest.raises(HardwareLocked, match="invalid response MAC"):
+        signer.status()
+    signer.close()
+    transport.bad_mac = False
+    with pytest.raises(HardwareLocked, match="unfinished hardware transaction"):
+        make_signer(path, transport)
+    with sqlite3.connect(path) as con:
+        assert (
+            con.execute("SELECT error FROM pg_hw_journal WHERE state='pending'").fetchone()[0]
+            == "HardwareLocked: invalid response MAC"
+        )
 
 
 @pytest.mark.parametrize("op", [Op.PAY, Op.COMMIT_INVOICE, Op.APPROVE_EXCEPTION])

@@ -413,19 +413,31 @@ class HardwareSigner:
             return False
         reason = self._state["lock_reason"] or ""
         prefix = "uncertain hardware transaction; do not retry or reset: "
-        if not reason.startswith(prefix):
-            return False
-        failure = reason[len(prefix) :]
         allowed = (
             "serial response timeout; do not reissue payment",
             "serial write timeout; outcome unknown",
             "serial disconnected",
         )
-        if failure not in allowed:
+        original_read_failure = reason.startswith(prefix) and reason[len(prefix) :] in allowed
+        overwritten_lock = (
+            reason == "unfinished hardware transaction; reconcile journals before restarting"
+        )
+        if not original_read_failure and not overwritten_lock:
             return False
+        recorded_failures = {*allowed, *("TransportError: " + failure for failure in allowed)}
         expected = command(Op.STATUS, session=self.session, currency=978).pack().hex()
         return all(
-            row["command_hex"] == expected and row["request_mac_hex"] == bytes(32).hex()
+            row["command_hex"] == expected
+            and row["request_mac_hex"] == bytes(32).hex()
+            and row["response_hex"] is None
+            and row["response_mac_hex"] is None
+            # Old startup code overwrote the useful lock reason. Recover only
+            # if every row still proves a UART read failure; a missing error
+            # could instead represent a bad MAC or an unexplained process crash.
+            and (
+                row["error"] in recorded_failures
+                or (original_read_failure and row["error"] is None)
+            )
             for row in pending
         )
 
@@ -550,6 +562,10 @@ class HardwareSigner:
                     + str(exc)
                     + "; no payment was authorized by this status request"
                 ) from exc
+            self._con.execute(
+                "UPDATE pg_hw_journal SET error=? WHERE id=?",
+                (f"{type(exc).__name__}: {exc}", row_id),
+            )
             self._lock_down("uncertain hardware transaction; do not retry or reset: " + str(exc))
 
     def _read_status(
