@@ -241,15 +241,25 @@ _RETENTION = re.compile(
 """Retention clauses as printed: en/de ("Sicherheitseinbehalt"), cs ("Zádržné", "kauce"),
 pl ("Kaucja gwarancyjna", "zatrzymanie"), ja ("留保", "…%は検収後に支払い")."""
 _PERCENT = re.compile(r"(\d{1,2}(?:[.,]\d)?)\s*%")
+_SENTENCE = re.compile(r"(?<=[.。;!?])\s+|[。\n]")
 
 
 def retention_bp_from(*texts: str | None) -> int | None:
-    """Basis points withheld when the document states a retention clause (R15); the printed
-    percentage wins, otherwise the contractual default of ``RETENTION_BP``."""
+    """Basis points withheld when the document states a retention clause (R15). The percentage
+    printed in the same sentence as the clause wins; a percentage elsewhere in the notes (a VAT
+    rate such as "stawka 0 %") is not the retention. Without a figure, the contractual default
+    ``RETENTION_BP`` applies."""
     for text in texts:
-        if text and _RETENTION.search(text):
-            m = _PERCENT.search(text)
-            if m:
-                return round(float(m.group(1).replace(",", ".")) * 100)
-            return RETENTION_BP
+        if not text or not _RETENTION.search(text):
+            continue
+        for sentence in _SENTENCE.split(text):
+            if _RETENTION.search(sentence):
+                m = _PERCENT.search(sentence)
+                if m:
+                    bp = round(float(m.group(1).replace(",", ".")) * 100)
+                    if bp > 0:
+                        return bp
+                    continue
+                return RETENTION_BP
+        return RETENTION_BP
     return None
