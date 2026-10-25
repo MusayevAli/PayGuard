@@ -369,3 +369,15 @@ Choices the spec left open, with the reasoning. Newest at the bottom of each par
     once however often the world is regenerated into a temporary directory. The prose model sees
     `*_minor` amounts pre-formatted with their currency (`present_for_prose`) and an explanation
     that alters a formatted number is rejected and regenerated once, then templated.
+83. **What the first real-API runs changed (2026-10-25).** The 60-document accuracy sample scored
+    556/556 fields on Opus 5 (USD 2.45) and 547/556 on Haiku 4.5 (USD 0.45, every miss on scanned
+    line items), so documents stay on Opus 5 and prose on Haiku 4.5. The full world run (210
+    rendered documents, 36 days) cost about USD 9.8 and caught every in-scope headline trap and
+    47 of 48 catchable ambient cases with no false positives. The one miss was ours, not the
+    model's: the Polish retention clause "Kaucja gwarancyjna" was extracted faithfully but the
+    R15 regex knew only the Czech spelling; the regex now covers every `RETENTION_NOTE` the
+    generator prints and a test enforces that. The API world test's pass ratio excludes cases whose
+    injected events fall after 5 Nov (pending, not missed). The harness warms the extraction cache
+    for the whole world at start (four documents at a time), which cut a cold run from about an
+    hour to about 25 minutes; a warm run costs cents. The accuracy sample does not cover free-text
+    fields (notes, payment terms), so the world run is the only check of those.
