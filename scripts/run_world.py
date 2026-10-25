@@ -51,6 +51,10 @@ def run_world(
     before_start: Callable[[Runtime], None] | None = None,
     each_day: Callable[[Runtime, date], None] | None = None,
 ) -> RunResult:
+    if os.environ.get("SIGNER", "stub") == "hw":
+        raise RuntimeError(
+            "The destructive accelerated world runner is simulation-only; use scripts.launch for hardware"
+        )
     run_dir.mkdir(parents=True, exist_ok=True)
     db = run_dir / "payguard.db"
     for suffix in ("", "-wal", "-shm"):

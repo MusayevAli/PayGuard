@@ -11,3 +11,27 @@ sim/world/
 *.db-shm
 .DS_Store
 ledger/
+
+# Generated device images and private operator material never belong in Git.
+hardware/build*/
+hardware/**/.generated/
+*.bit
+*.bit.bin
+*.xsa
+*.dcp
+*.jou
+*.log
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+.env
+.env.*
+!.env.example
+private/
+secrets/
+runtime/
+
+# Operator archives contain live credentials or keyed FPGA images.
+PayGuard-private-ready*.tar.gz
+payguard-operator*.tar.gz
+payguard-kv260-board*.tar.gz

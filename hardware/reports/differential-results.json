@@ -1,0 +1,7 @@
+{
+  "passed": true,
+  "scenarios": 35,
+  "responses": 205,
+  "response_hmacs_checked": 205,
+  "failures": []
+}

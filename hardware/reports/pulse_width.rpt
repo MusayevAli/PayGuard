@@ -1,0 +1,25 @@
+Copyright 1986-2022 Xilinx, Inc. All Rights Reserved. Copyright 2022-2026 Advanced Micro Devices, Inc. All Rights Reserved.
+--------------------------------------------------------------------------------------------------------------------------------------------------
+| Tool Version      : Vivado v.2026.1 (lin64) Build 6511674 Tue Jun 16 11:01:26 MDT 2026
+| Date              : Sat Oct 24 21:21:51 2026
+| Host              : starline-builder running 64-bit Ubuntu 24.04.4 LTS
+| Command           : report_pulse_width -file /home/ali_official2808/siliconsign-20261024/build-kv260-r4/pulse_width.rpt
+| Design            : siliconsign_bd_wrapper
+| Device            : xck26-sfvc784
+| Speed File        : -2LV  PRODUCTION 1.31 12-08-2025
+| Design State      : Routed
+| Temperature Grade : C
+--------------------------------------------------------------------------------------------------------------------------------------------------
+
+Pulse Width Report
+
+Clock Name:         clk_pl_0
+Waveform(ns):       { 0.000 5.000 }
+Period(ns):         10.000
+Sources:            { siliconsign_bd_i/ps/inst/PS8_i/PLCLK[0] }
+
+Check Type        Corner  Lib Pin          Reference Pin  Required(ns)  Actual(ns)  Slack(ns)  Location  Pin
+Min Period        n/a     PS8/MAXIGP0ACLK  n/a            3.000         10.000      7.000      PS8_X0Y0  siliconsign_bd_i/ps/inst/PS8_i/MAXIGP0ACLK
+Low Pulse Width   Slow    PS8/MAXIGP0ACLK  n/a            1.500         5.000       3.500      PS8_X0Y0  siliconsign_bd_i/ps/inst/PS8_i/MAXIGP0ACLK
+High Pulse Width  Slow    PS8/MAXIGP0ACLK  n/a            1.500         5.000       3.500      PS8_X0Y0  siliconsign_bd_i/ps/inst/PS8_i/MAXIGP0ACLK
+

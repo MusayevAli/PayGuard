@@ -1,0 +1,70 @@
+{
+  "scope": "Local software and actual RTL simulation; not synthesis, routing or physical-board validation.",
+  "passed": true,
+  "configuration": {
+    "vendor_slots": 64,
+    "obligation_slots": 256,
+    "clock_hz": 50000000,
+    "capacity_register": "0x00c",
+    "capacity_value": "0x01000040",
+    "clock_register": "0x010",
+    "identity_storage": "synchronous RAM, sequential duplicate scan"
+  },
+  "synthesis_source_sha256": "08eecdfd5edef1587d17d1ebc6eeef0f0abac6232baa127a08a81307d43ff8e2",
+  "checks": [
+    {
+      "check": "software",
+      "passed": true,
+      "tests": 71,
+      "log": "reports/current/software.log"
+    },
+    {
+      "check": "policy",
+      "passed": true,
+      "seconds": 0.05,
+      "log": "reports/current/policy-simulation.log"
+    },
+    {
+      "check": "hmac",
+      "passed": true,
+      "seconds": 0.16,
+      "log": "reports/current/hmac-simulation.log"
+    },
+    {
+      "check": "axi",
+      "passed": true,
+      "seconds": 0.39,
+      "log": "reports/current/axi-simulation.log"
+    },
+    {
+      "check": "scan",
+      "passed": true,
+      "seconds": 0.41,
+      "log": "reports/current/scan-simulation.log"
+    },
+    {
+      "check": "capacity",
+      "passed": true,
+      "seconds": 0.8,
+      "log": "reports/current/capacity-simulation.log"
+    },
+    {
+      "check": "core",
+      "passed": true,
+      "seconds": 1.74,
+      "log": "reports/current/core-simulation.log"
+    },
+    {
+      "check": "differential",
+      "passed": true,
+      "seconds": null,
+      "log": "reports/current/differential.log"
+    },
+    {
+      "check": "clock",
+      "passed": true,
+      "seconds": 83.39,
+      "log": "reports/current/clock-simulation.log"
+    }
+  ]
+}

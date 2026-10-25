@@ -1,0 +1,39 @@
+PayGuard R5 actual AMD processor-system-reset IP simulation
+
+Result: PASS, 11 checks; simulator exit status 0
+Completed: 2026-10-25T11:50:23Z
+Tool: AMD Vivado 2026.1 / XSim, existing starline-builder
+Input: actual generated proc_sys_reset XCI from the fresh R5 build
+Configuration: external and auxiliary reset active low; one-bit reset outputs
+Clock: 50,000,000 Hz
+Bench: hardware/sim/tb_proc_reset.sv
+Runner: hardware/vivado/test_reset_ip.tcl
+Remote report: reset-ip-sim-r5/reset-ip-verification.txt
+
+The runner imported a copy of the generated XCI into an isolated project and
+simulated AMD's actual IP. It did not substitute a handwritten reset model.
+These observed markers were recorded from the VM simulation result:
+
+RESET_CHECK 1 external reset holds startup cycles=1
+RESET_CHECK 2 external released and auxiliary high releases outputs cycles=71
+RESET_CHECK 3 historical auxiliary-low fault reproduced for 256 clocks
+RESET_CHECK 4 auxiliary low asserts all resets cycles=11
+RESET_CHECK 5 auxiliary high recovers cycles=71
+RESET_CHECK 6 external low asserts all resets cycles=11
+RESET_CHECK 7 external high recovers cycles=71
+RESET_CHECK 8 debug high asserts all resets cycles=11
+RESET_CHECK 9 debug low recovers cycles=71
+RESET_CHECK 10 clock unlock asserts all resets cycles=3
+RESET_CHECK 11 clock lock recovers cycles=63
+PAYGUARD_RESET_IP_PASS checks=11 clock_hz=50000000
+
+The negative-control instance uses the same AMD IP and configuration with the
+auxiliary input tied low. It remains in reset, reproducing the original r2
+integration fault. The corrected instance holds that inactive input high and
+successfully releases all reset outputs. Assertion and recovery are checked for
+auxiliary reset, external reset, debug reset, and loss of clock lock.
+
+Scope: actual vendor-IP behavioral simulation only. This is not physical-board
+verification, routed R5 timing evidence, a live AXI register result, or a live
+payment result. Those require separate evidence. No private keys or FPGA image
+contents are included in this report.

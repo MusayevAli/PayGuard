@@ -43,7 +43,8 @@ package = false
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-extend-exclude = ["sim/world", ".cache"]
+# Vendored SiliconSign has its own compiler/unittest/RTL verification command.
+extend-exclude = ["sim/world", ".cache", "hardware"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "W", "T20"]
@@ -60,8 +61,13 @@ python_version = "3.12"
 strict = true
 files = ["core", "sim/models.py", "signer", "bank"]
 plugins = ["pydantic.mypy"]
+mypy_path = ["hardware/python"]
 warn_unreachable = true
 show_error_codes = true
+
+[[tool.mypy.overrides]]
+module = ["siliconsign.*"]
+follow_imports = "skip"
 
 [tool.pydantic-mypy]
 init_forbid_extra = true

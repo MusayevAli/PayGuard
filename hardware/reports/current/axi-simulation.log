@@ -1,0 +1,3 @@
+PASS AXI signed response matches independent Python HMAC
+PASS: 351 AXI transactions; AW/W ordering, strobes, R/B backpressure, busy and pending protection
+/workspace/scratch/8b5e39b61ee0/PayGuard/hardware/sim/tb_axi.sv:219: $finish called at 31940000 (1ps)

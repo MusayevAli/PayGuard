@@ -1,0 +1,2 @@
+PASS: 13 authenticated core checks; every active-key response matched independent Python HMAC
+/workspace/scratch/8b5e39b61ee0/PayGuard/hardware/sim/tb_core.sv:133: $finish called at 208080000 (1ps)

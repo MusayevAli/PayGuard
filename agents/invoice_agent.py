@@ -23,7 +23,7 @@ from core.accounts import (
 from core.events import EventStore
 from core.ledger import Evidence, JournalEntry, JournalEntryDraft, JournalLineDraft, Ledger
 from core.money import FxRateUnavailable, Money, allocate, convert
-from core.packets import PacketDraft, PacketEvidence, PacketOption, PacketStore
+from core.packets import PacketDraft, PacketEvidence, PacketOption, PacketStore, format_minor
 from core.policy import PostAction, ReverseAction
 from core.rules import (
     FREIGHT_CONFIRM_MINOR,
@@ -585,8 +585,8 @@ class InvoiceAgent:
                         "to": "ap-invoices@tbeu.example",
                         "subject": f"Unknown vendor on invoice {v.invoice_number}",
                         "body": (
-                            f"Invoice {v.invoice_number} from {v.supplier_name} for {v.gross_minor} {v.currency} "
-                            f"(minor units). VAT ID {v.supplier_vat_id or 'none'}. "
+                            f"Invoice {v.invoice_number} from {v.supplier_name} for {format_minor(v.gross_minor, v.currency)}. "
+                            f"VAT ID {v.supplier_vat_id or 'none'}. "
                             f"IBAN {(v.bank_details.iban if v.bank_details else None) or 'none'}. New supplier: onboarding needed."
                         ),
                         "eml_path": None,
@@ -879,7 +879,7 @@ class InvoiceAgent:
                 amount=v.gross_minor,
                 currency=v.currency,
                 extra_refs=[],
-                text=f"Invoice {v.invoice_number} from {supplier.legal_name} ({v.gross_minor} {v.currency}) references no purchase order and matches no open PO line. Which PO is this?",
+                text=f"Invoice {v.invoice_number} from {supplier.legal_name} ({format_minor(v.gross_minor, v.currency)}) references no purchase order and matches no open PO line. Which PO is this?",
                 rule_id="R13",
             )
             raise Held
@@ -1174,7 +1174,7 @@ class InvoiceAgent:
                         ctx,
                         refs=[invoice_id, v.invoice_number, vendor_id],
                         severity="action",
-                        question=f"Invoice {v.invoice_number} prints VAT {v.vat_minor} but 19 % of {v.net_minor} is {expected}. Decide?",
+                        question=f"Invoice {v.invoice_number} prints VAT {format_minor(v.vat_minor, v.currency)} but 19 % of {format_minor(v.net_minor, v.currency)} is {format_minor(expected, v.currency)}. Decide?",
                         context="Domestic VAT differs from 19 % by more than the rounding tolerance.",
                         materiality=abs(v.vat_minor - expected),
                         currency=v.currency,
@@ -1355,8 +1355,8 @@ class InvoiceAgent:
                 self._packet(
                     ctx,
                     invoice_id,
-                    f"{supplier.legal_name} charged VAT {vat_disputed} {v.currency} on reverse-charge invoice {v.invoice_number}. Dispute?",
-                    f"R11: intra-EU supply billed with VAT; posted net {net_posted} {v.currency}, VAT disputed.",
+                    f"{supplier.legal_name} charged VAT {format_minor(vat_disputed, v.currency)} on reverse-charge invoice {v.invoice_number}. Dispute?",
+                    f"R11: intra-EU supply billed with VAT; posted net {format_minor(net_posted, v.currency)}, VAT disputed.",
                     "action",
                     [invoice_id, v.invoice_number, vendor_id],
                     vat_disputed,
@@ -1422,6 +1422,7 @@ class InvoiceAgent:
     ) -> None:
         shorts = [it for it in items if it.balance > 0]
         short_minor = sum(it.balance * it.unit_price_po_units for it in shorts)
+        posted_minor = sum(it.qty_to_post * it.unit_price_po_units for it in shorts)
         facts = {
             "supplier_name": supplier.legal_name,
             "invoice_number": v.invoice_number,
@@ -1431,9 +1432,11 @@ class InvoiceAgent:
             "gr_ids": ", ".join(r.gr.id for it in shorts for r in it.receipts),
             "qty_received": sum(it.qty_available for it in shorts),
             "qty_posted": sum(it.qty_to_post for it in shorts),
-            "amount_posted": sum(it.qty_to_post * it.unit_price_po_units for it in shorts),
+            "amount_posted_minor": posted_minor,
+            "amount_posted": str(Money(posted_minor, v.currency).as_decimal()),
             "currency": v.currency,
-            "short_pay": short_minor,
+            "short_pay_minor": short_minor,
+            "short_pay": str(Money(short_minor, v.currency).as_decimal()),
             "balance_qty": sum(it.balance for it in shorts),
         }
         message = self.llm.draft_message("short_pay_notice", facts)
@@ -1541,7 +1544,8 @@ class InvoiceAgent:
                             "to_name": buyer.split(".")[0].capitalize(),
                             "supplier_name": supplier.legal_name,
                             "invoice_number": v.invoice_number,
-                            "amount": v.net_minor,
+                            "amount_minor": v.net_minor,
+                            "amount": str(Money(v.net_minor, v.currency).as_decimal()),
                             "currency": v.currency,
                             "description": "; ".join(ln.description for ln in v.lines),
                         },
@@ -1557,7 +1561,7 @@ class InvoiceAgent:
                     ctx,
                     refs=[invoice_id, v.invoice_number, vendor_id],
                     severity="action",
-                    question=f"Freight invoice {v.invoice_number} ({v.net_minor} {v.currency}) was not confirmed by the buyer. Approve or reject?",
+                    question=f"Freight invoice {v.invoice_number} ({format_minor(v.net_minor, v.currency)}) was not confirmed by the buyer. Approve or reject?",
                     context=f"R13: above EUR 2,000; buyer reply: {reply.get('body', '')}",
                     materiality=v.gross_minor,
                     currency=v.currency,

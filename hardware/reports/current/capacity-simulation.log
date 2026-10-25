@@ -1,0 +1,2 @@
+PASS production capacity: 350 checks; 64 vendors / 256 immutable obligations
+/workspace/scratch/8b5e39b61ee0/PayGuard/hardware/sim/tb_capacity.sv:133: $finish called at 1369591000 (1ps)

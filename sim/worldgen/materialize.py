@@ -323,7 +323,9 @@ def materialize(rng: random.Random, seed: int, suppliers: list[Supplier], plan: 
     for po in plan.pos:
         derive_dates(rng, po)
     # ---- purchase orders (ids by order date)
-    ordered = sorted(plan.pos, key=lambda p: (p.order_date or END, p.supplier.id, id(p)))
+    # Stable sorting preserves the seeded plan order for ties. Object addresses
+    # vary between processes and must never determine purchase-order identities.
+    ordered = sorted(plan.pos, key=lambda p: (p.order_date or END, p.supplier.id))
     pos: list[PurchaseOrder] = []
     amendment_times: dict[str, datetime] = {}
     for n, po in enumerate(ordered, start=10001):

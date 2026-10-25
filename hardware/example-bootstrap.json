@@ -1,0 +1,64 @@
+{
+  "description": "Synthetic demo fixtures, not live provider checks or real payments",
+  "policy": {
+    "daily_cap": 10000000,
+    "threshold": 500000,
+    "cooldown": 86400,
+    "max_count": 100,
+    "currency": 840
+  },
+  "vendors": [
+    {
+      "synthetic": true,
+      "command": {
+        "op": "ADD_VENDOR",
+        "vendor": 0,
+        "account": "0c683387d565e9681d63eaa29ed490e10e1ebc81cb2a47520ddb376754a2b675",
+        "vendor_version": 1,
+        "vendor_cap": 5000000,
+        "evidence": "f9a28aeb84a4b8cb78910d9e56e5ba72d6fa6c0d28fd5a466d8de39662ffeaf6"
+      }
+    }
+  ],
+  "invoices": [
+    {
+      "command": {
+        "op": "COMMIT_INVOICE",
+        "vendor": 0,
+        "invoice": 0,
+        "account": "0c683387d565e9681d63eaa29ed490e10e1ebc81cb2a47520ddb376754a2b675",
+        "vendor_version": 1,
+        "amount": 85000,
+        "flags": 0,
+        "invoice_hash": "1cad2e0e7b99e149d082af7344f837c2f06b12e10b1fcf90d8a163d248b00740",
+        "evidence": "8e28b670f1ec9eb7e672be0ca76f48be8a9b8da9994e20036a247fe1e77a7883"
+      }
+    },
+    {
+      "command": {
+        "op": "COMMIT_INVOICE",
+        "vendor": 0,
+        "invoice": 1,
+        "account": "0c683387d565e9681d63eaa29ed490e10e1ebc81cb2a47520ddb376754a2b675",
+        "vendor_version": 1,
+        "amount": 480000,
+        "flags": 1,
+        "invoice_hash": "9ad4171d45ec009f7865fb62ea2cad246ee4bc81ba9b79700dd2c11e08090fd9",
+        "evidence": "08760a23d09e28c1ed805d5c1bfb240e1b20b88db405420ef653eed493fbe53d"
+      }
+    },
+    {
+      "command": {
+        "op": "COMMIT_INVOICE",
+        "vendor": 0,
+        "invoice": 2,
+        "account": "0c683387d565e9681d63eaa29ed490e10e1ebc81cb2a47520ddb376754a2b675",
+        "vendor_version": 1,
+        "amount": 25000,
+        "flags": 0,
+        "invoice_hash": "1097d41a468603c8b50179bf275e25fb5f2b35fb1d8971aa9c5a8fc5bf0b90a2",
+        "evidence": "ac37344fedee3edf2b1601934ac69e5c111876e61ff72e48d8a277b965264f7d"
+      }
+    }
+  ]
+}

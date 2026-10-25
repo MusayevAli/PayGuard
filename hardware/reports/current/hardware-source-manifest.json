@@ -1,0 +1,14 @@
+{
+  "scope": "Synthesis input source files, no keys or generated bitstreams",
+  "sha256": "08eecdfd5edef1587d17d1ebc6eeef0f0abac6232baa127a08a81307d43ff8e2",
+  "hash_definition": "SHA256 of ordered lines: <file SHA256><two spaces><relative path><LF>",
+  "files": {
+    "rtl/hmac_sha256.sv": "e5cd6d84dea44a79d3fd736a86d094ed9fb5b5804eecf5052b9671b4b9671ae4",
+    "rtl/policy_engine.sv": "05d3d14b2354a350d07e556457bd0cdf7ef19988134fc9a426f2e52a2a4f6803",
+    "rtl/sha256_core.sv": "ddb43d7e0f1ed1316bd0c8de6cfaa71d2c2b74c7b534030e0c07e9e7e2951a05",
+    "rtl/siliconsign_axi.sv": "f24036198ea548895046bb4a3fdc20cbce1771fc23312dea76bbceedac17b0fb",
+    "rtl/siliconsign_core.sv": "be320f63b408dd11451093173bb8fc5ad7a28b138f55ed2e8cf64ae3e60588a3",
+    "vivado/build_kv260.tcl": "2dc0e072ba888112aedcbfff0caeb20228d999846437f1f20e601c90ab08d698",
+    "vivado/package_overlay.tcl": "4b2d0bff52f78fb7664073e99944dd374d126166fd45b248db535ffe05a7529e"
+  }
+}

@@ -45,7 +45,7 @@ from core.rules import (
 )
 from core.vendors import VendorBankAccount, VendorMaster
 from signer.frames import PayFrame, day_index, encode
-from signer.interface import Signer
+from signer.interface import Signer, SignResult
 from signer.provisioning import Provisioner
 from sim.fx import FxTable
 from sim.models import Event
@@ -148,7 +148,7 @@ class PaymentAgent:
         return []
 
     def retry_waiting(self, ctx: Context) -> int:
-        """Re-send approved payments once a button nonce exists (after ``POST /stub/button``)."""
+        """Retry approved payments after their signer-specific approval is present."""
         sent = 0
         for row in self.state.payments(status="awaiting_button"):
             if self._try_button(row, ctx):
@@ -158,7 +158,10 @@ class PaymentAgent:
     # ------------------------------------------------------------------ the day
 
     def _day(self, today: date, ctx: Context) -> None:
+        self._recover_inflight(ctx)
         self.bank.publish_statements(through=today - timedelta(days=1))
+        # HardwareSigner treats this date as diagnostic only and rolls budgets
+        # only when the authenticated FPGA clock has reached the next real day.
         self.signer.tick_day(day_index(today))
         self.retry_waiting(ctx)
         self._escalate_stale_lines(today, ctx)
@@ -176,6 +179,7 @@ class PaymentAgent:
             self._run(today, ctx)
 
     def _run(self, today: date, ctx: Context) -> None:
+        self._recover_inflight(ctx)
         groups = sorted(self._eligible(today), key=lambda g: g.sort_key)
         cash = {ccy: self.bank.balance(ccy) for ccy in SETTLEMENT_CURRENCIES}
         status = self.signer.status()
@@ -229,6 +233,8 @@ class PaymentAgent:
                             "currency": g.currency,
                             "amount_minor": g.pay_amount,
                             "cash_minor": cash[settle_ccy],
+                            "cash_currency": settle_ccy,
+                            "settlement_currency": settle_ccy,
                         }
                     )
                 continue
@@ -239,6 +245,7 @@ class PaymentAgent:
                         "currency": g.currency,
                         "eur_equiv_minor": eur,
                         "remaining_cap_minor": remaining_cap,
+                        "remaining_cap_currency": "EUR",
                     }
                 )
                 continue
@@ -277,14 +284,26 @@ class PaymentAgent:
                 "daily_cap_remaining_minor": max(
                     0, status.daily_cap_minor - status.daily_spent_minor
                 ),
+                "daily_cap_remaining_currency": "EUR",
             },
             decision=decision,
         )
 
     def _eligible(self, today: date) -> list[Group]:
         groups: dict[tuple[str, str], Group] = {}
+        reserved = (
+            {
+                pid
+                for row in self.state.payments()
+                if row.status in ("requested", "awaiting_decision", "awaiting_button")
+                or row.held_reason == "settlement_recovery_required"
+                for pid in row.payable_ids
+            }
+            if self.signer.kind == "hw"
+            else set()
+        )
         for p in self.ledger.payables():
-            if p.status != "open" or self.ledger.is_retention_payable(p):
+            if p.id in reserved or p.status != "open" or self.ledger.is_retention_payable(p):
                 continue
             g = groups.setdefault(
                 (p.vendor_id, p.currency), Group(vendor_id=p.vendor_id, currency=p.currency)
@@ -401,6 +420,17 @@ class PaymentAgent:
                 "rate_date": conv[1],
                 "requested_by": self.principal,
                 "frame_hex": frame.hex(),
+                **(
+                    {
+                        "settlement_currency": settle_ccy,
+                        "settlement_minor": settle_minor,
+                        "covered": covered,
+                        "credits": {c.id: c.amount_minor for c in g.credits},
+                        "discount_minor": discount,
+                    }
+                    if self.signer.kind == "hw"
+                    else {}
+                ),
             },
             source="agent",
             actor=self.principal,
@@ -449,7 +479,27 @@ class PaymentAgent:
             frame_hex=frame.hex(),
             seq=self.signer.status().seq + 1,
         )
-        res = self.signer.sign(frame)
+        if self.signer.kind == "hw":
+            # Reserve before touching the device or bank. If the process stops after
+            # settlement, these obligations cannot silently become a new batch.
+            for payable_id in g.payable_ids:
+                self.ledger.set_payable_status(payable_id, "scheduled")
+            try:
+                # The FPGA signs the hash of this complete settlement batch. The
+                # bank independently reconstructs it from the immutable event log.
+                prepare = getattr(self.signer, "prepare_payment", None)
+                if not callable(prepare):
+                    raise ValueError("hardware signer has no payment-binding hook")
+                prepare(frame, req.payload)
+                res = self.signer.sign(frame)
+            except (ValueError, TypeError, KeyError) as exc:
+                log.warning("hardware_binding_refused", pay_id=pay_id, error=str(exc))
+                res = SignResult(ok=False, raw=b"", reason="invalid_payment_binding")
+            except Exception as exc:
+                log.warning("hardware_unavailable", pay_id=pay_id, error=type(exc).__name__)
+                res = SignResult(ok=False, raw=b"", reason="hardware_unavailable")
+        else:
+            res = self.signer.sign(frame)
         chip_reason = None if res.ok else (res.reason or "unknown")
         annotations: list[str] = []
         if not res.ok and acct.hold_until > ctx.now:
@@ -469,6 +519,7 @@ class PaymentAgent:
                 "latency_ms": res.latency_ms,
                 "raw_hex": res.raw.hex(),
                 "signer": self.signer.kind,
+                **({"authorization": res.authorization} if self.signer.kind == "hw" else {}),
             },
             source="signer",
             actor=self.signer.kind,
@@ -488,8 +539,11 @@ class PaymentAgent:
                 request_event_id=req.id,
                 chip_event_id=chip.id,
             )
-        assert res.tag is not None
-        bank_res = self.bank.execute(frame, res.tag)
+        if self.signer.kind == "hw":
+            bank_res = self.bank.execute(frame, authorization=res.authorization)
+        else:
+            assert res.tag is not None
+            bank_res = self.bank.execute(frame, res.tag)
         if not bank_res.ok:
             reason = f"bank:{bank_res.reason}"
             self._hold_payables(
@@ -504,7 +558,10 @@ class PaymentAgent:
                     "detail": bank_res.detail,
                 },
             )
-            return self.state.update_payment(pay_id, now=ctx.now, status="held", held_reason=reason)
+            held = self.state.update_payment(pay_id, now=ctx.now, status="held", held_reason=reason)
+            if self.signer.kind == "hw":
+                self._hardware_hold_packet(held, ctx, req.id, chip.id, bank_res.event_id)
+            return held
         executed = ctx.emit(
             "payment_executed",
             {
@@ -572,6 +629,7 @@ class PaymentAgent:
             decision={
                 "post_minor": gross - g.credit,
                 "paid_minor": settle_minor,
+                "paid_currency": settle_ccy,
                 "currency": g.currency,
                 "settlement_currency": settle_ccy,
                 "discount_minor": discount,
@@ -650,8 +708,25 @@ class PaymentAgent:
             packet = self.packets.create_packet(
                 PacketDraft(
                     agent=self.principal,
-                    question=f"Approve payment {pay_id}: {_fmt(row.amount_minor, row.currency)} {row.currency} (EUR {_fmt(row.eur_equiv_minor, 'EUR')}) to {g.vendor_id}? It exceeds the EUR 50,000.00 button threshold (R10).",
-                    context=f"The chip answered needs_button for {', '.join(numbers or [p.inv_id for p in g.payables])}. Approving asks the controller to press the button; the payment is re-sent with the button nonce.",
+                    question=(
+                        f"Approve payment {pay_id}: {_fmt(row.amount_minor, row.currency)} {row.currency} "
+                        f"(EUR {_fmt(row.eur_equiv_minor, 'EUR')}) to {g.vendor_id}? "
+                        + (
+                            "The FPGA requires approval for this exact batch."
+                            if self.signer.kind == "hw"
+                            else "It exceeds the EUR 50,000.00 button threshold (R10)."
+                        )
+                    ),
+                    context=(
+                        f"The chip answered needs_button for {', '.join(numbers or [p.inv_id for p in g.payables])}. "
+                        + (
+                            "Review the bound account, invoices, credits, discount, native amount and settlement in the evidence. "
+                            "This demo uses a trusted operator approval signed for this exact batch, with an expiry; "
+                            "it does not have a physical approval button. Approval cannot bypass another FPGA rule."
+                            if self.signer.kind == "hw"
+                            else "Approving asks the controller to simulate an approval nonce; the stub payment is re-sent with that nonce."
+                        )
+                    ),
                     severity="action",
                     refs=[pay_id, g.vendor_id, *[p.inv_id for p in g.payables], *numbers],
                     evidence=[
@@ -667,9 +742,20 @@ class PaymentAgent:
                     materiality_minor=row.eur_equiv_minor,
                     currency="EUR",
                     recommendation="approve",
-                    recommendation_reason="the vendor account is on the allowlist and the payables are due; only the amount triggers the control",
+                    recommendation_reason=(
+                        "review the evidence; this exact payment requires a separate trusted operator approval"
+                        if self.signer.kind == "hw"
+                        else "the vendor account is on the allowlist and the payables are due; only the amount triggers the control"
+                    ),
                     options=[
-                        PacketOption(id="approve", label="Approve and press the button"),
+                        PacketOption(
+                            id="approve",
+                            label=(
+                                "Approve this exact batch"
+                                if self.signer.kind == "hw"
+                                else "Approve this simulated payment"
+                            ),
+                        ),
                         PacketOption(id="reject", label="Reject the payment"),
                     ],
                     expires_at=ctx.now + timedelta(days=5),
@@ -688,7 +774,97 @@ class PaymentAgent:
             row = self.state.update_payment(pay_id, now=ctx.now, packet_id=packet.id)
         elif reason == "not_allowlisted" and self.provisioner is not None:
             self.provisioner.enqueue(g.vendor_id)
-        return row
+            if self.signer.kind == "hw":
+                self._hardware_hold_packet(row, ctx, request_event_id, chip_event_id)
+        elif self.signer.kind == "hw":
+            self._hardware_hold_packet(row, ctx, request_event_id, chip_event_id)
+        return self.state.payment(pay_id) or row
+
+    def _recover_inflight(self, ctx: Context) -> None:
+        if self.signer.kind != "hw":
+            return
+        for row in self.state.payments(status="requested"):
+            # A prior call stopped between creating the batch and completing the
+            # ledger. Do not infer that an unposted payment was never settled.
+            held = self.state.update_payment(
+                row.pay_id, now=ctx.now, status="held", held_reason="settlement_recovery_required"
+            )
+            for payable_id in row.payable_ids:
+                self.ledger.set_payable_status(
+                    payable_id, "held", held_reason="settlement_recovery_required"
+                )
+            if row.requested_event_id:
+                self._hardware_hold_packet(held, ctx, row.requested_event_id, row.chip_event_id)
+
+    def _hardware_hold_packet(
+        self,
+        row: PaymentRow,
+        ctx: Context,
+        request_id: str,
+        chip_id: str | None,
+        bank_id: str | None = None,
+    ) -> None:
+        evidence = [
+            PacketEvidence(
+                event_id=request_id,
+                role="payment_request",
+                summary="Immutable batch: account, native amount, settlement, covered invoices, credits and discount",
+            ),
+        ]
+        if chip_id:
+            evidence.append(
+                PacketEvidence(
+                    event_id=chip_id,
+                    role="chip_response",
+                    summary=f"Recorded device outcome; hold reason: {row.held_reason}",
+                )
+            )
+        if bank_id:
+            evidence.append(
+                PacketEvidence(
+                    event_id=bank_id,
+                    role="bank_rejection",
+                    summary="Independent bank verification refused settlement",
+                )
+            )
+        packet = self.packets.create_packet(
+            PacketDraft(
+                agent=self.principal,
+                question=f"Payment {row.pay_id} remains held: {row.held_reason}.",
+                context=(
+                    f"Vendor {row.vendor_id}; {_fmt(row.amount_minor, row.currency)} {row.currency}; "
+                    f"EUR cap amount {_fmt(row.eur_equiv_minor, 'EUR')}; account hash {row.account_hash}. "
+                    "Review the recorded request, device response and bank settlement before taking further action. "
+                    "An acknowledgement does not authorize payment or override the hardware rule. "
+                    + (
+                        "The prior process stopped before the ledger was completed; settlement may already have occurred. "
+                        "Reconcile the existing pay_id; do not create a replacement payment."
+                        if row.held_reason == "settlement_recovery_required"
+                        else ""
+                    )
+                ),
+                severity="action",
+                refs=[row.pay_id, row.vendor_id, *row.payable_ids],
+                evidence=evidence,
+                materiality_minor=row.eur_equiv_minor,
+                currency="EUR",
+                recommendation="acknowledge",
+                recommendation_reason="keep the batch held until the failed control is resolved",
+                options=[PacketOption(id="acknowledge", label="Acknowledge; keep payment held")],
+                expires_at=None,
+                consequence_of_silence="No settlement occurs; liabilities remain recorded.",
+                kind="anomaly",
+            ),
+            created_at=ctx.now,
+        )
+        self.state.add_packet(
+            packet.id,
+            kind="hardware_hold",
+            pay_id=row.pay_id,
+            payable_id=None,
+            data={"vendor_id": row.vendor_id, "reason": row.held_reason},
+        )
+        self.state.update_payment(row.pay_id, now=ctx.now, packet_id=packet.id)
 
     def _hold_payables(
         self,
@@ -756,9 +932,15 @@ class PaymentAgent:
     def _try_button(
         self, row: PaymentRow, ctx: Context, *, decision_event_id: str | None = None
     ) -> bool:
-        nonce = self.signer.nonce()
-        if nonce is None:
-            return False
+        if self.signer.kind == "hw":
+            ready = getattr(self.signer, "approval_ready", None)
+            if not callable(ready) or not ready(row.pay_id):
+                return False
+            nonce = 0  # The FPGA approval binds this batch, never a reusable nonce.
+        else:
+            nonce = self.signer.nonce()
+            if nonce is None:
+                return False
         g = self._group_from(row)
         if g is None:
             return False
@@ -1239,8 +1421,8 @@ class PaymentAgent:
                 evidence=[Evidence(event_id=ev.id, role="statement_line")],
             ),
             refs=[ref, ev.id],
-            inputs={"difference_minor": diff},
-            decision={"rule": "R12", "post_minor": abs(diff)},
+            inputs={"difference_minor": diff, "currency": currency},
+            decision={"rule": "R12", "post_minor": abs(diff), "currency": currency},
             rule_id="R12",
         )
         return entry.id

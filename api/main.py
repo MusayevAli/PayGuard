@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 import threading
@@ -17,6 +18,7 @@ from fastapi import FastAPI, Query, Request, WebSocket
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
+from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from api.schemas import SpeedIn
@@ -62,6 +64,7 @@ class IdempotencyCache:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._seen: dict[tuple[str, str], tuple[int, Any]] = {}
+        self._inflight: dict[tuple[str, str], threading.Lock] = {}
 
     def run(self, request: Request, compute: Callable[[], tuple[int, Any]]) -> tuple[int, Any]:
         key = request.headers.get("Idempotency-Key")
@@ -71,8 +74,16 @@ class IdempotencyCache:
         with self._lock:
             if ident in self._seen:
                 return self._seen[ident]
+            flight = self._inflight.setdefault(ident, threading.Lock())
+        # Only duplicate requests wait for one another. A long step/model call
+        # must not hold the cache mutex and block an unrelated pause/approval.
+        with flight:
+            with self._lock:
+                if ident in self._seen:
+                    return self._seen[ident]
             result = compute()
-            self._seen[ident] = result
+            with self._lock:
+                self._seen[ident] = result
             return result
 
 
@@ -89,9 +100,14 @@ def create_app(
     desk: bool = True,
 ) -> FastAPI:
     signer_kind = os.environ.get("SIGNER", "stub")
-    if signer_kind != "stub":
+    if signer_kind not in ("stub", "hw"):
         raise RuntimeError(
-            f"SIGNER={signer_kind!r}: the hardware client arrives in Part 7; only the stub signer exists"
+            "SIGNER must be stub or hw; hardware failures never fall back to simulation"
+        )
+    controller_token = os.environ.get("PAYGUARD_CONTROLLER_TOKEN", "")
+    if signer_kind == "hw" and len(controller_token) < 32:
+        raise RuntimeError(
+            "Hardware mode requires PAYGUARD_CONTROLLER_TOKEN of at least 32 characters"
         )
     store = EventStore(db_path)
     world_events = load_world_events(Path(world_dir) / "world.jsonl")
@@ -138,6 +154,28 @@ def create_app(
 
     app = FastAPI(title="PayGuard", version="0.1.0", lifespan=lifespan)
     app.state.store, app.state.clock, app.state.hub = store, clock, hub
+    app.state.runtime = runtime
+
+    def require_controller(request: Request) -> None:
+        if controller_token and not hmac.compare_digest(
+            request.headers.get("X-Payguard-Controller", "").encode("utf-8"),
+            controller_token.encode("utf-8"),
+        ):
+            raise StarletteHTTPException(403, "Unlock controls to run this action.")
+
+    @app.middleware("http")
+    async def protect_mutations(request: Request, call_next: Any) -> Any:
+        if request.method not in ("GET", "HEAD", "OPTIONS"):
+            try:
+                require_controller(request)
+            except StarletteHTTPException:
+                return error_response(
+                    403,
+                    "controller_required",
+                    "Unlock controls to run this action.",
+                    "Open Settings and enter the control password stored in private/controller-token.",
+                )
+        return await call_next(request)
 
     @app.exception_handler(ApiError)
     async def _api_error(_: Request, exc: ApiError) -> JSONResponse:
@@ -181,7 +219,7 @@ def create_app(
         }
 
     @app.get("/state")
-    async def get_state() -> dict[str, Any]:
+    def get_state() -> dict[str, Any]:
         return state_body()
 
     @app.post("/clock/{action}")
@@ -252,7 +290,8 @@ def create_app(
                 "last_seq": max(seqs) if seqs else None,
             }
 
-        status, payload = idem.run(request, compute)
+        # Advancing the clock can synchronously drain agents and call a model.
+        status, payload = await run_in_threadpool(idem.run, request, compute)
         return JSONResponse(status_code=status, content=payload)
 
     @app.get("/events")
@@ -276,21 +315,27 @@ def create_app(
     desk_rt: Runtime = runtime
 
     @app.get("/chip/status")
-    async def chip_status() -> dict[str, Any]:
+    def chip_status() -> dict[str, Any]:
         return {
             **desk_rt.signer.status().to_json(),
+            "signer_kind": desk_rt.signer.kind,
+            "controller_required": bool(controller_token),
+            "approval_mode": "authenticated-software"
+            if signer_kind == "hw"
+            else "simulated-button",
+            "bank_mode": "simulated",
             "slots_host": desk_rt.provisioner.slots(),
             "provisioning_queue": desk_rt.provisioner.queued(),
         }
 
     @app.post("/stub/button")
-    async def stub_button(request: Request) -> JSONResponse:
+    def stub_button(request: Request) -> JSONResponse:
         if signer_kind != "stub" or not hasattr(desk_rt.signer, "press_button"):
             raise ApiError(
                 404,
                 "not_found",
-                "the button is physical on the hardware signer",
-                "press the button on the device; this route exists only with SIGNER=stub",
+                "the simulation button is unavailable in hardware mode",
+                "review the evidence and use the authenticated payment authorization route",
             )
 
         def compute() -> tuple[int, Any]:
@@ -347,7 +392,7 @@ def create_app(
         return render(packet)
 
     @app.post("/packets/{packet_id}/decide")
-    async def decide(packet_id: str, body: DecisionIn, request: Request) -> JSONResponse:
+    def decide(packet_id: str, body: DecisionIn, request: Request) -> JSONResponse:
         packet = desk_rt.packets.get(packet_id)
         if packet is None:
             raise ApiError(404, "not_found", f"no packet {packet_id}", "GET /packets lists the ids")
@@ -365,8 +410,8 @@ def create_app(
                 packet_id,
                 body.decision,
                 body.note,
-                body.decided_by,
-                via="phone",
+                "authenticated-controller" if controller_token else body.decided_by,
+                via="trusted_operator_ui",
                 decided_at=clock.sim_now,
             )
             desk_rt.runner.drain()
@@ -405,7 +450,7 @@ def create_app(
         return {"vendor_id": vendor_id, "accounts": [_account_view(a) for a in rows]}
 
     @app.post("/judge/message")
-    async def judge_message(form: MessageForm, request: Request) -> JSONResponse:
+    def judge_message(form: MessageForm, request: Request) -> JSONResponse:
         supplier = None
         if form.supplier_id:
             supplier = next((s for s in desk_rt.suppliers if s.id == form.supplier_id), None)
@@ -488,6 +533,52 @@ def create_app(
         status, payload = idem.run(request, compute)
         return JSONResponse(status_code=status, content=payload)
 
+    @app.post("/controller/payments/{pay_id}/authorize")
+    def authorize_payment(pay_id: str, request: Request) -> dict[str, Any]:
+        require_controller(request)
+        if desk_rt.signer.kind != "hw":
+            raise ApiError(
+                409,
+                "hardware_required",
+                "Exact software authorization is a hardware-mode action",
+                "Use the clearly labelled simulation control in stub mode",
+            )
+        payment = desk_rt.payment_state.payment(pay_id)
+        if payment is None or payment.status != "awaiting_button":
+            raise ApiError(
+                409,
+                "review_required",
+                "This payment is not awaiting separate authorization",
+                "Approve its evidence packet first",
+            )
+        try:
+            desk_rt.signer.approve_pending(pay_id)
+            resent = (
+                desk_rt.runner.run_task(desk_rt.payment_agent, desk_rt.payment_agent.retry_waiting)
+                or 0
+            )
+        except (ValueError, RuntimeError, OSError) as exc:
+            raise ApiError(
+                409,
+                "authorization_failed",
+                str(exc),
+                "Inspect chip status and the evidence; do not reset or resubmit an uncertain payment",
+            ) from exc
+        return {
+            "pay_id": pay_id,
+            "payments_resent": resent,
+            "approval_mode": "authenticated-software",
+        }
+
+    from api.dashboard import install_dashboard
+    from api.dataset import install_dataset
+    from api.demo import create_demo_router
+    from api.judge import create_judge_router
+
+    app.include_router(create_demo_router(desk_rt, require_controller=require_controller))
+    app.include_router(create_judge_router(desk_rt, require_controller=require_controller))
+    install_dashboard(app, desk_rt, Path(world_dir))
+    install_dataset(app, desk_rt, Path(world_dir))
     return app
 
 

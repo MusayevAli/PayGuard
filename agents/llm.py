@@ -9,6 +9,7 @@ per-call log with model, tokens, latency and cost.
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import json
 import os
@@ -27,6 +28,7 @@ import structlog
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from core.events import canonical_json
+from core.money import Money, UnknownCurrency
 
 from .documents import Document
 from .parsed import ExtractionFailure, ParsedInvoice
@@ -169,14 +171,23 @@ EXTRACTION_TOOL: dict[str, Any] = {
     },
 }
 
-EXPLAIN_SYSTEM = """You write one short, plain-language sentence or two (at most 60 words) explaining a decision an accounts-payable agent already made. Use only the identifiers listed in refs and the facts in inputs/decision; never add new identifiers, amounts or reasons. Write for a finance colleague, present tense, no preamble."""
+EXPLAIN_SYSTEM = """You write one short, plain-language sentence or two (at most 60 words) explaining a decision an accounts-payable agent already made. Use only canonical_decision.refs and the supplied facts; never add new identifiers, amounts or reasons. Canonical evidence remains authoritative.
+Money integers in canonical_decision are MINOR units, not whole currency units. The separate money records supply minor, currency, exact major and display values already converted by trusted code. For every monetary amount, copy a supplied display value (for example, 11,500.00 PLN), preserving its currency and sign. Never present raw minor integers as currency amounts, calculate a conversion yourself, or infer money from unlabeled positional rows. If major/display is null, omit that monetary amount. Do not spell amounts out in words. Quantities and basis points are not currency amounts.
+Write for a finance colleague, present tense, no preamble."""
 
-MESSAGE_SYSTEM = """You rewrite a short internal business message in a natural, courteous tone. Keep every identifier, amount, quantity and date from the facts exactly as given, add nothing new, and stay under 90 words. Return only the message text."""
+MESSAGE_SYSTEM = """You rewrite a short internal business message in a natural, courteous tone. Keep the identifiers, quantities, dates and monetary amounts in the supplied draft, add nothing new, and stay under 90 words. Audit fields ending in _minor are integer MINOR units, not whole currency units. Separate money records give the exact major and display values: use those values with their currency, never the raw minor integers. Do not calculate conversions or spell monetary amounts out in words. Return only the message text."""
 
 ID_PATTERN = re.compile(
     r"\b(?:[A-Z]{1,4}-\d{2,6}[A-Z]?|ev_[0-9a-f]{6,16}|PK-[0-9a-f]{12}|JE-\d{6}|AP-\d{6}|VBA-\d{6})\b"
 )
 AMOUNT_PATTERN = re.compile(r"\d[\d .,]*\d")
+_MONEY_CODES = r"EUR|CZK|PLN|USD|JPY|GBP|CHF|CAD|AUD|HUF|SEK|NOK|DKK|CNY|RMB|€|\$|¥|£"
+_MONEY_NUMBER = r"[+\-−]?\d+(?:[ ,.\u00a0\u202f]\d+)*"
+_MONEY_MENTION = re.compile(
+    rf"(?<!\w)(?:(?P<before>{_MONEY_CODES})\s*(?P<after_amount>{_MONEY_NUMBER})"
+    rf"|(?P<before_amount>{_MONEY_NUMBER})\s*(?P<after>{_MONEY_CODES}))(?!\w)",
+    re.I,
+)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS extraction_cache (key TEXT PRIMARY KEY, sha256 TEXT, kind TEXT, model TEXT, result TEXT NOT NULL, created_at TEXT);
@@ -221,6 +232,95 @@ def call_cost(
     return total.quantize(Decimal("0.000001"))
 
 
+def explanation_facts(decision: dict[str, Any]) -> dict[str, Any]:
+    """Separate display money from canonical evidence without changing either's units."""
+    canonical = copy.deepcopy(decision)
+    money: list[dict[str, Any]] = []
+    facts = canonical.get("decision") or {}
+    inputs = canonical.get("inputs") or {}
+    default_currency = facts.get("currency") or inputs.get("currency")
+    if default_currency is None:
+        default_currency = (inputs.get("hints") or {}).get("currency")
+
+    def record(path: str, minor: int, currency: Any) -> None:
+        currency = currency.upper() if isinstance(currency, str) else None
+        major = display = None
+        if currency is not None:
+            try:
+                value = Money(minor, currency)
+                major = str(value.as_decimal())
+                display = f"{value.as_decimal():,.{value.minor_digits}f} {currency}"
+            except UnknownCurrency:
+                pass
+        money.append(
+            {"path": path, "minor": minor, "currency": currency, "major": major, "display": display}
+        )
+
+    def visit(node: Any, path: str, inherited_currency: Any) -> None:
+        if isinstance(node, dict):
+            currency = node.get("currency", inherited_currency)
+            for key, value in node.items():
+                child_path = f"{path}.{key}" if path else key
+                if key.endswith("_minor") and type(value) is int:
+                    if "_eur_" in key or key.startswith("eur_"):
+                        amount_currency = "EUR"
+                    elif node.get(key.removesuffix("_minor") + "_currency"):
+                        amount_currency = node[key.removesuffix("_minor") + "_currency"]
+                    elif key == "settlement_minor":
+                        amount_currency = node.get("settlement_currency")
+                    elif key == "cash_minor":
+                        amount_currency = node.get("cash_currency") or node.get(
+                            "settlement_currency"
+                        )
+                    elif key in (
+                        "paid_minor",
+                        "payment_minor",
+                        "shortfall_minor",
+                        "available_minor",
+                    ):
+                        amount_currency = node.get("settlement_currency", currency)
+                    else:
+                        amount_currency = currency
+                    record(child_path, value, amount_currency)
+                else:
+                    visit(value, child_path, currency)
+        elif isinstance(node, (list, tuple)):
+            if (
+                len(node) == 2
+                and isinstance(node[0], str)
+                and re.fullmatch(r"[A-Z]{3}", node[0])
+                and type(node[1]) is int
+            ):
+                record(path, node[1], node[0])
+            else:
+                for index, value in enumerate(node):
+                    visit(value, f"{path}[{index}]", inherited_currency)
+
+    visit(canonical, "", default_currency)
+    return {"canonical_decision": canonical, "money": money}
+
+
+def _money_mentions_match(text: str, money: Sequence[dict[str, Any]]) -> bool:
+    allowed = {
+        (item["currency"], Decimal(item["major"])) for item in money if item["major"] is not None
+    }
+    aliases = {"€": "EUR", "$": "USD", "¥": "JPY", "£": "GBP"}
+    for match in _MONEY_MENTION.finditer(text):
+        currency = (match.group("before") or match.group("after")).upper()
+        currency = aliases.get(currency, currency)
+        raw = match.group("after_amount") or match.group("before_amount")
+        # Wording uses the supplied English display convention; ambiguous local
+        # separators are rejected rather than guessed.
+        normalized = re.sub(r"[,\s\u202f]", "", raw).replace("−", "-")
+        try:
+            amount = Decimal(normalized)
+        except ArithmeticError:
+            return False
+        if (currency, amount) not in allowed:
+            return False
+    return True
+
+
 def template_explanation(decision: dict[str, Any]) -> str:
     """Deterministic fallback prose built only from the structured decision."""
     action = str(decision.get("action_type", "action")).replace("_", " ")
@@ -233,6 +333,7 @@ def template_explanation(decision: dict[str, Any]) -> str:
         parts.append("for " + ", ".join(refs))
     body = " ".join(parts) + "."
     facts = decision.get("decision") or {}
+    money = {item["path"]: item for item in explanation_facts(decision)["money"]}
     details = []
     for key in (
         "qty_posted",
@@ -244,7 +345,15 @@ def template_explanation(decision: dict[str, Any]) -> str:
         "reason",
     ):
         if key in facts and facts[key] not in (None, ""):
-            details.append(f"{key.replace('_', ' ')} {facts[key]}")
+            amount = money.get(f"decision.{key}")
+            if amount is not None:
+                label = key.removesuffix("_minor").replace("_", " ")
+                display = (
+                    amount["display"] or f"{amount['minor']} minor units (currency unavailable)"
+                )
+                details.append(f"{label} {display}")
+            else:
+                details.append(f"{key.replace('_', ' ')} {facts[key]}")
     if details:
         body += " " + "; ".join(details[:3]) + "."
     return body
@@ -349,13 +458,15 @@ class LLMClient:
         return self._client
 
     def _async(self) -> Any:
-        if self._async_client is None:
-            if not self.credentials_available():
-                raise LLMUnavailable(
-                    "no Anthropic credentials: export ANTHROPIC_API_KEY or run `ant auth login`"
-                )
-            self._async_client = anthropic.AsyncAnthropic(max_retries=2, timeout=self._timeout)
-        return self._async_client
+        if self._async_client is not None:
+            return self._async_client
+        if not self.credentials_available():
+            raise LLMUnavailable(
+                "no Anthropic credentials: export ANTHROPIC_API_KEY or run `ant auth login`"
+            )
+        # Each prefetch batch owns an asyncio.run loop. Its pooled sockets must
+        # be created and closed within that loop, never reused by the next one.
+        return anthropic.AsyncAnthropic(max_retries=2, timeout=self._timeout)
 
     # ------------------------------------------------------------------ cache + log
 
@@ -633,7 +744,11 @@ class LLMClient:
                             doc.sha256, doc.sha256, "extract", self.model, result.model_dump_json()
                         )
 
-            await asyncio.gather(*(one(d) for d in pending))
+            try:
+                await asyncio.gather(*(one(d) for d in pending))
+            finally:
+                if self._async_client is None:
+                    await client.close()
 
         worker = threading.Thread(target=lambda: asyncio.run(run()), name="llm-prefetch")
         worker.start()
@@ -670,25 +785,32 @@ class LLMClient:
     def explain(self, decision: dict[str, Any]) -> str:
         """<= 60 words citing only ids in decision.refs; regenerate once, then template fallback."""
         refs = [str(r) for r in decision.get("refs", [])]
-        key = "explain:" + hashlib.sha256(canonical_json(decision).encode()).hexdigest()
+        facts = explanation_facts(decision)
+        key = "explain:money-v1:" + hashlib.sha256(canonical_json(facts).encode()).hexdigest()
         cached = self._cached(key)
-        if cached is not None:
+        if cached is not None and _money_mentions_match(cached, facts["money"]):
             return cached
         fallback = template_explanation(decision)
         if not self.credentials_available():
             return fallback
-        prompt = "Decision (JSON):\n" + json.dumps(decision, ensure_ascii=False, indent=2)
+        prompt = "Decision and explicit monetary units (JSON):\n" + json.dumps(
+            facts, ensure_ascii=False, indent=2
+        )
         text: str | None = None
         try:
             for attempt in range(2):
                 extra = (
                     ""
                     if attempt == 0
-                    else "\nYour previous attempt mentioned an identifier not in refs or was too long. Use only these identifiers: "
+                    else "\nYour previous attempt used an unapproved identifier, an unsupported monetary amount, or too many words. Copy monetary display values exactly and use only these identifiers: "
                     + ", ".join(refs)
                 )
                 text = self._text_call("explain", EXPLAIN_SYSTEM, prompt + extra)
-                if text and validate_explanation(text, refs):
+                if (
+                    text
+                    and validate_explanation(text, refs)
+                    and _money_mentions_match(text, facts["money"])
+                ):
                     break
                 text = None
         except LLMUnavailable:
@@ -757,21 +879,31 @@ class LLMClient:
     def draft_message(self, kind: str, facts: dict[str, Any]) -> str:
         """Templated skeleton; the model only adjusts tone. Every amount and id must come from facts."""
         skeleton = template_message(kind, facts)
+        wording_facts = explanation_facts({"decision": facts})
         key = (
-            "message:"
+            "message:money-v1:"
             + hashlib.sha256(canonical_json({"kind": kind, "facts": facts}).encode()).hexdigest()
         )
         cached = self._cached(key)
-        if cached is not None:
+        if cached is not None and _money_mentions_match(cached, wording_facts["money"]):
             return cached
         if not self.credentials_available():
             return skeleton
-        prompt = f"Message kind: {kind}\nFacts (JSON): {json.dumps(facts, ensure_ascii=False)}\n\nDraft to polish:\n{skeleton}"
+        prompt = (
+            f"Message kind: {kind}\nFacts with explicit monetary units (JSON): "
+            f"{json.dumps(wording_facts, ensure_ascii=False)}\n\nDraft to polish:\n{skeleton}"
+        )
         try:
             text = self._text_call("draft_message", MESSAGE_SYSTEM, prompt, max_tokens=400)
         except LLMUnavailable:
             text = None
-        result = text if text and validate_message(text, facts) else skeleton
+        result = (
+            text
+            if text
+            and validate_message(text, facts)
+            and _money_mentions_match(text, wording_facts["money"])
+            else skeleton
+        )
         self._store(key, None, "draft_message", self.text_model, result)
         return result
 

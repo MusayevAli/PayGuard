@@ -1,0 +1,2 @@
+PASS policy_engine: 102 adversarial and lifecycle checks
+/workspace/scratch/8b5e39b61ee0/PayGuard/hardware/sim/tb_policy.sv:240: $finish called at 66966000 (1ps)

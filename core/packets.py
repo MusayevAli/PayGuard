@@ -119,6 +119,7 @@ class PacketStore:
         self._con.execute("PRAGMA journal_mode=WAL")
         self._con.execute("PRAGMA synchronous=NORMAL")
         self._con.executescript(SCHEMA)
+        self._recover_decision_events()
 
     def close(self) -> None:
         with self._lock:
@@ -196,11 +197,17 @@ class PacketStore:
         via: str | None = "phone",
         decided_at: datetime | None = None,
     ) -> PacketDecision:
-        """Record the controller's decision once; later calls return the first decision unchanged."""
+        """Persist the winning decision before publishing it; retries return that winner.
+
+        The packet row is a durable outbox. Its conditional update arbitrates across
+        threads and independent processes, so a losing decision is never emitted as
+        an actionable event. A restart or retry republishes an interrupted winner.
+        """
         packet = self.get(packet_id)
         if packet is None:
             raise PacketError(f"no packet {packet_id}")
         if packet.decision is not None:
+            self._publish_decision(packet.decision)
             return packet.decision
         option_ids = [o.id for o in packet.options]
         if decision not in option_ids and decision != packet.auto_action_on_expiry:
@@ -208,21 +215,19 @@ class PacketStore:
                 f"decision {decision!r} is not an option of {packet_id} ({option_ids})"
             )
         when = decided_at or self._now()
-        event = self._events.append(
-            make_event(
-                "controller_decision",
-                {
-                    "packet_id": packet_id,
-                    "decision": decision,
-                    "note": note,
-                    "decided_by": decided_by,
-                    "via": via,
-                },
-                event_time=when,
-                source="controller",
-                actor=decided_by,
-            )
-        ).event
+        event = make_event(
+            "controller_decision",
+            {
+                "packet_id": packet_id,
+                "decision": decision,
+                "note": note,
+                "decided_by": decided_by,
+                "via": via,
+            },
+            event_time=when,
+            source="controller",
+            actor=decided_by,
+        )
         result = PacketDecision(
             packet_id=packet_id,
             decision=decision,
@@ -235,11 +240,47 @@ class PacketStore:
         status: PacketStatus = "expired" if decided_by == "auto_expiry" else "decided"
         updated = packet.model_copy(update={"status": status, "decision": result})
         with self._lock:
-            self._con.execute(
+            claimed = self._con.execute(
                 "UPDATE packets SET status = ?, decision_event_id = ?, data = ? WHERE id = ? AND decision_event_id IS NULL",
                 (status, event.id, updated.model_dump_json(), packet_id),
             )
+            if claimed.rowcount != 1:
+                winner = self.get(packet_id)
+                if winner is None or winner.decision is None:
+                    raise PacketError(f"cannot recover the winning decision for {packet_id}")
+                result = winner.decision
+        self._publish_decision(result)
         return result
+
+    def _publish_decision(self, decision: PacketDecision) -> None:
+        """Publish only the persisted winner; EventStore deduplicates by its content."""
+        event = make_event(
+            "controller_decision",
+            {
+                "packet_id": decision.packet_id,
+                "decision": decision.decision,
+                "note": decision.note,
+                "decided_by": decision.decided_by,
+                "via": decision.via,
+            },
+            event_time=decision.decided_at,
+            source="controller",
+            actor=decision.decided_by,
+        )
+        if event.id != decision.event_id:
+            raise PacketError(f"stored decision event does not match {decision.packet_id}")
+        self._events.append(event)
+
+    def _recover_decision_events(self) -> None:
+        """Complete a committed decision whose event was interrupted by a restart."""
+        with self._lock:
+            rows = self._con.execute(
+                "SELECT data FROM packets WHERE decision_event_id IS NOT NULL"
+            ).fetchall()
+        for row in rows:
+            decision = Packet.model_validate_json(row["data"]).decision
+            if decision is not None and not self._events.exists(decision.event_id):
+                self._publish_decision(decision)
 
     def expire_open_packets(self, now: datetime) -> list[PacketDecision]:
         """Apply the safe no-op (hold) to every open packet whose ``expires_at`` has passed."""

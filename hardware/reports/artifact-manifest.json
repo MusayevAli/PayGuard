@@ -1,0 +1,38 @@
+{
+  "siliconsign.bit": {
+    "bytes": 7797913,
+    "sha256": "875bd21b9d7c994b381e2e77b4232de9cbf34920bef4d4636c04491a514881f2"
+  },
+  "siliconsign.bit.bin": {
+    "bytes": 7797692,
+    "sha256": "a5bf0f3bafe0a3ce5aeed15a8858e3eebb4bc9143ef06fb2d3ee980b524d50fe"
+  },
+  "siliconsign.xsa": {
+    "bytes": 2001762,
+    "sha256": "abaf05fd0b461f9fea461532446b7896db7e65d68deb59c192a16bf70763ff66"
+  },
+  "siliconsign.dts": {
+    "bytes": 1055,
+    "sha256": "6a9e1ea39bebf4eaa28d13757b8a70f3bb0d962f7283e5c5e70344e2a568f0d1"
+  },
+  "siliconsign.dtbo": {
+    "bytes": 1140,
+    "sha256": "a029a4c4c1e7f1bd245ac036c420bf189c0aaa05e434482e340a3d144face401"
+  },
+  "timing_summary.rpt": {
+    "bytes": 19724,
+    "sha256": "477762a7a631cbc24fb2a98b5a2741fa72e6802e23593bc1c09ab656f51db642"
+  },
+  "utilization.rpt": {
+    "bytes": 12195,
+    "sha256": "771f0171bfc84947f7152b9839094c6657d56438ee25d92542e27e758d95e575"
+  },
+  "drc.rpt": {
+    "bytes": 1364,
+    "sha256": "69229268cc0e77654c3ccced947aaec499fca842b67434ee1cdec48e5b0bc95a"
+  },
+  "pulse_width.rpt": {
+    "bytes": 1670,
+    "sha256": "2bded67b2dc981280b2bda896c7478fd90e7d157f1ab70b21ad80091b4d47413"
+  }
+}

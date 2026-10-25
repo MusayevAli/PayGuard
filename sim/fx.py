@@ -88,10 +88,12 @@ def parse_ecb_csv(text: str) -> History:
 
 
 def _ssl_context() -> ssl.SSLContext:
-    """Verify TLS against certifi's CA bundle; python-build-standalone ships without one."""
+    """Verify TLS using platform trust plus certifi for standalone Python installs."""
     import certifi
 
-    return ssl.create_default_context(cafile=certifi.where())
+    context = ssl.create_default_context()
+    context.load_verify_locations(cafile=certifi.where())
+    return context
 
 
 def _read_zip(blob: bytes) -> str:

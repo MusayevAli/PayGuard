@@ -2,19 +2,45 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
 
 from agents.llm import LLMClient
+from core.score import CaseStatus, ScoreReport
 from scripts.run_world import run_world
+from sim.models import AnswerKey, Event
 
 HEADLINE_IN_SCOPE = ("T1", "T2", "T3", "T4", "T5", "T6", "T10")
 
 
-def test_world_run_through_november_5(world_dir: Path, tmp_path: Path) -> None:
+def _ambient_in_scope(
+    report: ScoreReport, key: AnswerKey, world_events: Sequence[Event]
+) -> list[CaseStatus]:
+    """Score cases whose required evidence has arrived by the run's exact cutoff.
+
+    A pending case can be an already-arrived invoice the agent did not handle,
+    so status must never determine eligibility. Missing answer-key event IDs
+    are invalid fixtures and deliberately raise instead of shrinking the scope.
+    """
+    events_by_id = {event.id: event for event in world_events}
+    eligible_ids = {
+        entry.id
+        for entry in key.ambient
+        if entry.case != "M2"
+        and max(events_by_id[event_id].known_at for event_id in entry.injected_event_ids)
+        <= report.as_of
+    }
+    return [case for case in report.cases if case.tier == "ambient" and case.id in eligible_ids]
+
+
+def test_world_run_through_november_5(
+    world_dir: Path, world_events: list[Event], tmp_path: Path
+) -> None:
     if not LLMClient.credentials_available():
         pytest.fail(
             "Anthropic credentials are required for the world run: export ANTHROPIC_API_KEY (or `ant auth login`)"
@@ -24,7 +50,9 @@ def test_world_run_through_november_5(world_dir: Path, tmp_path: Path) -> None:
         tmp_path / "run",
         until="2026-11-05",
         agents=("invoice",),
-        cache_db=world_dir.parent / "extraction_cache.db",
+        cache_db=Path(
+            os.environ.get("PAYGUARD_TEST_LLM_CACHE", world_dir.parent / "extraction_cache.db")
+        ),
     )
     report = result.report
     by_id = {c.id: c for c in report.cases}
@@ -34,7 +62,8 @@ def test_world_run_through_november_5(world_dir: Path, tmp_path: Path) -> None:
         if by_id[cid].status != "caught"
     }
     assert failures == {}, failures
-    ambient = [c for c in report.cases if c.tier == "ambient" and c.case != "M2"]
+    key = AnswerKey.model_validate_json((world_dir / "answer_key.json").read_bytes())
+    ambient = _ambient_in_scope(report, key, world_events)
     caught = [c for c in ambient if c.status == "caught"]
     missed = {
         c.id: [x.detail for x in c.checks if not x.ok] for c in ambient if c.status != "caught"

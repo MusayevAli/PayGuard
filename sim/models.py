@@ -449,7 +449,7 @@ class ControllerDecision(StrictModel):
     decision: str
     note: str | None
     decided_by: str
-    via: Literal["phone", "dashboard", "api"] | None = None
+    via: Literal["phone", "dashboard", "api", "trusted_operator_ui"] | None = None
 
 
 class AgentAction(StrictModel):
@@ -493,6 +493,11 @@ class PaymentRequested(StrictModel):
     rate_date: date | None
     requested_by: str
     frame_hex: str | None
+    settlement_minor: int | None = None
+    settlement_currency: Currency | None = None
+    covered: dict[str, int] = Field(default_factory=dict)
+    credits: dict[str, int] = Field(default_factory=dict)
+    discount_minor: int = 0
 
 
 class ChipResponse(StrictModel):
@@ -508,6 +513,7 @@ class ChipResponse(StrictModel):
     latency_ms: int | None
     raw_hex: str | None
     signer: Literal["stub", "hw"]
+    authorization: dict[str, Any] | None = None
 
 
 class BankRejected(StrictModel):

@@ -1,0 +1,2 @@
+PASS sequential hash scan: 26 capture, busy, reset, duplicate and mutation checks
+/workspace/scratch/8b5e39b61ee0/PayGuard/hardware/sim/tb_scan.sv:183: $finish called at 59871000 (1ps)

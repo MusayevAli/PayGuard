@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import math
 import sqlite3
+import struct
 import threading
 from collections.abc import Callable
 from datetime import UTC, date, datetime, time, timedelta
@@ -18,6 +19,7 @@ from typing import Any
 import structlog
 from pydantic import BaseModel, ConfigDict
 
+from core.accounts import AP_ACCOUNT
 from core.bootstrap import OPENING_BANK_MINOR
 from core.events import EventStore, make_event
 from core.money import FxRateUnavailable, Money, convert
@@ -46,6 +48,22 @@ CREATE TABLE IF NOT EXISTS bank_settlements (
   amount_minor INTEGER NOT NULL, value_date TEXT NOT NULL, customer_ref TEXT NOT NULL,
   remittance TEXT NOT NULL, published INTEGER NOT NULL DEFAULT 0, detail TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS bank_hardware_receipts (
+  session TEXT NOT NULL, authorization_counter INTEGER NOT NULL, invoice_hash TEXT NOT NULL,
+  pay_id TEXT NOT NULL UNIQUE, bank_ref TEXT NOT NULL,
+  PRIMARY KEY (session, authorization_counter), UNIQUE (session, invoice_hash)
+);
+CREATE TABLE IF NOT EXISTS bank_obligation_limits (
+  payable_id TEXT PRIMARY KEY, vendor_id TEXT NOT NULL, invoice_id TEXT NOT NULL,
+  entry_id TEXT NOT NULL, currency TEXT NOT NULL, kind TEXT NOT NULL,
+  capacity_minor INTEGER NOT NULL CHECK(capacity_minor > 0),
+  consumed_minor INTEGER NOT NULL DEFAULT 0 CHECK(consumed_minor >= 0 AND consumed_minor <= capacity_minor),
+  UNIQUE(entry_id, currency)
+);
+CREATE TABLE IF NOT EXISTS bank_obligation_consumptions (
+  pay_id TEXT NOT NULL, payable_id TEXT NOT NULL, amount_minor INTEGER NOT NULL,
+  PRIMARY KEY(pay_id, payable_id)
+);
 CREATE TABLE IF NOT EXISTS bank_statements_seen (statement_id TEXT PRIMARY KEY, lines INTEGER NOT NULL, known_date TEXT NULL, currency TEXT NULL);
 """
 
@@ -66,6 +84,12 @@ class BankResult(BaseModel):
     event_id: str | None
 
 
+class _SettlementRefusal(ValueError):
+    def __init__(self, reason: str, detail: str) -> None:
+        super().__init__(detail)
+        self.reason = reason
+
+
 class MockBank:
     def __init__(
         self,
@@ -80,10 +104,18 @@ class MockBank:
         accounts: dict[str, str] | None = None,
         opening: dict[str, int] | None = None,
         overdraft: dict[str, int] | None = None,
+        hardware_response_key: bytes | None = None,
+        hardware_session: bytes | None = None,
+        require_hardware_authorization: bool = False,
     ) -> None:
         self._overdraft = dict(OVERDRAFT_LIMIT_MINOR) if overdraft is None else dict(overdraft)
         self._store = store
         self._key = key
+        self._hardware_response_key = hardware_response_key
+        self._hardware_session = hardware_session
+        self._require_hardware_authorization = (
+            require_hardware_authorization or hardware_response_key is not None
+        )
         self._fx = fx
         self._now = now
         self._schedule = schedule
@@ -100,6 +132,7 @@ class MockBank:
                 (ccy, minor),
             )
         self._requests: dict[str, dict[str, Any]] = {}
+        self._first_requests: dict[str, dict[str, Any]] = {}
         self._requests_seq = 0
         self._line_keys: set[str] | None = None
         self._line_keys_seq = 0
@@ -179,6 +212,7 @@ class MockBank:
             type="payment_requested", since_seq=self._requests_seq, limit=1_000_000
         ):
             self._requests[str(e.payload["pay_id"])] = e.payload
+            self._first_requests.setdefault(str(e.payload["pay_id"]), e.payload)
             if e.seq is not None:
                 self._requests_seq = max(self._requests_seq, e.seq)
         return self._requests.get(pay_id)
@@ -192,9 +226,24 @@ class MockBank:
             ).fetchall()
         return {str(r["currency"]) for r in rows}
 
-    def execute(self, frame: bytes, tag: bytes) -> BankResult:
-        """Settle a signed payment. The tag must verify against the shared key; the native amount
-        comes from the ``payment_requested`` event for the frame's pay_id."""
+    def execute(
+        self,
+        frame: bytes,
+        tag: bytes | None = None,
+        *,
+        authorization: dict[str, Any] | None = None,
+    ) -> BankResult:
+        """Verify a stub tag or a complete FPGA receipt, then settle exactly once.
+
+        Hardware mode never accepts a legacy HMAC. The response MAC, hardware session,
+        immutable batch, native amount, and actual settlement all have to agree.
+        """
+        with self._lock:
+            return self._execute(frame, tag, authorization=authorization)
+
+    def _execute(
+        self, frame: bytes, tag: bytes | None, *, authorization: dict[str, Any] | None
+    ) -> BankResult:
         try:
             decoded = decode(frame)
         except FrameError as exc:
@@ -203,7 +252,21 @@ class MockBank:
             return self._reject("?", "not_a_payment", "frame is not a pay frame", 0, "EUR", None)
         pay = decoded
         prefix = pay.account_hash.hex()[:12]
-        if not verify_tag(self._key, frame, tag):
+        hardware = self._require_hardware_authorization or authorization is not None
+        if hardware and (
+            authorization is None
+            or self._hardware_response_key is None
+            or self._hardware_session is None
+        ):
+            return self._reject(
+                pay.pay_id,
+                "missing_hardware_authorization",
+                "a full FPGA receipt and configured response key/session are required",
+                pay.amount_minor,
+                pay.currency,
+                prefix,
+            )
+        if not hardware and (tag is None or not verify_tag(self._key, frame, tag)):
             return self._reject(
                 pay.pay_id,
                 "bad_tag",
@@ -268,16 +331,157 @@ class MockBank:
                     pay.pay_id, "fx_unavailable", str(exc), native_minor, currency, prefix
                 )
             settle_ccy, settle_minor, rate = "EUR", conv.money.minor, str(conv.rate)
-        if self.balance(settle_ccy) + self._overdraft.get(settle_ccy, 0) < settle_minor:
-            return self._reject(
-                pay.pay_id,
-                "insufficient_funds",
-                f"{settle_ccy} balance {self.balance(settle_ccy)} plus overdraft {self._overdraft.get(settle_ccy, 0)} < {settle_minor}",
-                native_minor,
-                currency,
-                prefix,
+        receipt: tuple[str, int, str] | None = None
+        binding: dict[str, Any] | None = None
+        if hardware:
+            from signer.authority import canonical_binding, verify_authorization
+
+            try:
+                binding = canonical_binding(req)
+                if binding != canonical_binding(self._first_requests[pay.pay_id]):
+                    raise ValueError(
+                        "payment request changed after the immutable batch was created"
+                    )
+                if (
+                    binding["settlement_currency"] != settle_ccy
+                    or binding["settlement_minor"] != settle_minor
+                ):
+                    raise ValueError(
+                        "authorized settlement differs from the bank's independent calculation"
+                    )
+                if req.get("frame_hex") != frame.hex():
+                    raise ValueError("legacy frame differs from the recorded payment request")
+                assert authorization is not None and self._hardware_response_key is not None
+                verified = verify_authorization(
+                    authorization,
+                    frame,
+                    self._hardware_response_key,
+                    binding,
+                    expected_session=self._hardware_session,
+                )
+                # The trusted provisioning journal gives a logical vendor its
+                # hardware slot. A digest alone does not validate that mapping.
+                try:
+                    vendor = self._con.execute(
+                        "SELECT slot, account_hash, version FROM pg_hw_vendors WHERE vendor_id = ?",
+                        (binding["vendor_id"],),
+                    ).fetchone()
+                except sqlite3.OperationalError as exc:
+                    raise ValueError(
+                        "trusted hardware provisioning registry is unavailable"
+                    ) from exc
+                if vendor is None or (
+                    verified.words[8] != int(vendor["slot"])
+                    or verified.words[14] != int(vendor["version"])
+                    or binding["account_hash"] != vendor["account_hash"]
+                ):
+                    raise ValueError(
+                        "FPGA vendor slot/account/version differs from the trusted provisioning registry"
+                    )
+                response = bytes.fromhex(str(authorization["response_hex"]))
+                receipt = (
+                    response[16:32].hex(),
+                    struct.unpack_from("<I", response, 57 * 4)[0],
+                    response[24 * 4 : 32 * 4].hex(),
+                )
+                if receipt[1] == 0:
+                    raise ValueError("hardware authorization counter must be positive")
+            except (ValueError, TypeError, KeyError, AssertionError) as exc:
+                return self._reject(
+                    pay.pay_id,
+                    "bad_hardware_authorization",
+                    str(exc),
+                    native_minor,
+                    currency,
+                    prefix,
+                )
+        try:
+            return self._record_settlement(
+                pay=pay,
+                req=req,
+                native_minor=native_minor,
+                currency=currency,
+                settle_ccy=settle_ccy,
+                settle_minor=settle_minor,
+                rate=rate,
+                value_date=value_date,
+                receipt=receipt,
+                binding=binding,
+                authorization=authorization,
             )
-        with self._lock:
+        except _SettlementRefusal as exc:
+            return self._reject(pay.pay_id, exc.reason, str(exc), native_minor, currency, prefix)
+
+    def _record_settlement(
+        self,
+        *,
+        pay: PayFrame,
+        req: dict[str, Any],
+        native_minor: int,
+        currency: str,
+        settle_ccy: str,
+        settle_minor: int,
+        rate: str | None,
+        value_date: date,
+        receipt: tuple[str, int, str] | None,
+        binding: dict[str, Any] | None,
+        authorization: dict[str, Any] | None,
+    ) -> BankResult:
+        # BEGIN IMMEDIATE protects both the funds check and receipt consumption across
+        # independent bank processes, as well as across threads in this instance.
+        self._con.execute("BEGIN IMMEDIATE")
+        try:
+            prior = self._con.execute(
+                "SELECT * FROM bank_settlements WHERE pay_id = ? AND dc = 'D' ORDER BY bank_ref LIMIT 1",
+                (pay.pay_id,),
+            ).fetchone()
+            if prior is not None:
+                detail = json.loads(prior["detail"])
+                if (
+                    detail.get("native_currency") != currency
+                    or detail.get("native_minor") != native_minor
+                    or prior["currency"] != settle_ccy
+                    or int(prior["amount_minor"]) != settle_minor
+                    or (binding is not None and detail.get("binding") != binding)
+                ):
+                    raise _SettlementRefusal(
+                        "payment_replay_mismatch",
+                        "pay_id already settled with different payment details",
+                    )
+                result = BankResult(
+                    ok=True,
+                    pay_id=pay.pay_id,
+                    bank_ref=prior["bank_ref"],
+                    reason=None,
+                    detail="already settled",
+                    amount_minor=native_minor,
+                    currency=currency,
+                    settlement_currency=prior["currency"],
+                    settlement_amount_minor=int(prior["amount_minor"]),
+                    fx_rate=detail.get("fx_rate"),
+                    value_date=date.fromisoformat(prior["value_date"]),
+                    event_id=None,
+                )
+                self._con.execute("COMMIT")
+                return result
+            if receipt is not None:
+                used = self._con.execute(
+                    "SELECT pay_id FROM bank_hardware_receipts WHERE (session = ? AND authorization_counter = ?) OR (session = ? AND invoice_hash = ?)",
+                    (receipt[0], receipt[1], receipt[0], receipt[2]),
+                ).fetchone()
+                if used is not None:
+                    raise _SettlementRefusal(
+                        "hardware_receipt_replayed",
+                        "hardware authorization already consumed by a settlement",
+                    )
+            available = self.balance(settle_ccy) + self._overdraft.get(settle_ccy, 0)
+            if available < settle_minor:
+                raise _SettlementRefusal(
+                    "insufficient_funds",
+                    f"{settle_ccy} funds including overdraft {available} < {settle_minor}",
+                )
+            if binding is not None:
+                self._consume_obligations(pay.pay_id, binding)
             n = (
                 int(
                     self._con.execute(
@@ -291,6 +495,9 @@ class MockBank:
             remittance = f"/REMI/{pay.pay_id} {req['vendor_id']} {req['account_masked']}"
             if rate is not None:
                 remittance += f" {currency} {native_minor} AT {rate}"
+            detail = {"native_currency": currency, "native_minor": native_minor, "fx_rate": rate}
+            if binding is not None:
+                detail.update(binding=binding, authorization=authorization)
             self._con.execute(
                 "INSERT INTO bank_settlements(bank_ref, pay_id, currency, dc, amount_minor, value_date, customer_ref, remittance, published, detail) VALUES (?,?,?,?,?,?,?,?,0,?)",
                 (
@@ -302,15 +509,23 @@ class MockBank:
                     value_date.isoformat(),
                     pay.pay_id,
                     truncate_remittance(remittance),
-                    json.dumps(
-                        {"native_currency": currency, "native_minor": native_minor, "fx_rate": rate}
-                    ),
+                    json.dumps(detail),
                 ),
             )
             self._con.execute(
                 "UPDATE bank_state SET runtime_delta_minor = runtime_delta_minor - ? WHERE currency = ?",
                 (settle_minor, settle_ccy),
             )
+            if receipt is not None:
+                self._con.execute(
+                    "INSERT INTO bank_hardware_receipts(session, authorization_counter, invoice_hash, pay_id, bank_ref) VALUES (?,?,?,?,?)",
+                    (*receipt, pay.pay_id, bank_ref),
+                )
+            self._con.execute("COMMIT")
+        except BaseException:
+            if self._con.in_transaction:
+                self._con.execute("ROLLBACK")
+            raise
         log.info(
             "payment_settled",
             pay_id=pay.pay_id,
@@ -335,6 +550,113 @@ class MockBank:
             value_date=value_date,
             event_id=None,
         )
+
+    def _consume_obligations(self, pay_id: str, binding: dict[str, Any]) -> None:
+        """Consume invoice/credit coverage under the existing settlement transaction.
+
+        Hardware prevents reusing a batch. The bank separately prevents paying the
+        same obligation again under a new pay_id. Its first-seen remaining capacity
+        is immutable, so editing a payable later cannot replenish bank coverage.
+        """
+        claims = [(pid, amount, "invoice") for pid, amount in binding["covered"].items()] + [
+            (pid, -amount, "credit") for pid, amount in binding["credits"].items()
+        ]
+        for payable_id, claimed, kind in claims:
+            try:
+                payable = self._con.execute(
+                    "SELECT vendor_id, inv_id, entry_id, amount_minor, currency, status, held_reason FROM payables WHERE id = ?",
+                    (payable_id,),
+                ).fetchone()
+                entry = (
+                    None
+                    if payable is None
+                    else self._con.execute(
+                        "SELECT cause_id FROM journal_entries WHERE id = ?", (payable["entry_id"],)
+                    ).fetchone()
+                )
+                original = (
+                    0
+                    if payable is None
+                    else self._con.execute(
+                        "SELECT COALESCE(SUM(credit_minor - debit_minor), 0) FROM journal_lines WHERE entry_id = ? AND account = ? AND currency = ?",
+                        (payable["entry_id"], AP_ACCOUNT, binding["currency"]),
+                    ).fetchone()[0]
+                )
+            except sqlite3.OperationalError as exc:
+                raise _SettlementRefusal(
+                    "unknown_obligation", "the bank cannot verify the originating ledger obligation"
+                ) from exc
+            if payable is None or entry is None:
+                raise _SettlementRefusal(
+                    "unknown_obligation", f"no posted ledger obligation for {payable_id}"
+                )
+            direction = 1 if kind == "invoice" else -1
+            current = int(payable["amount_minor"]) * direction
+            original = int(original) * direction
+            if (
+                payable["vendor_id"] != binding["vendor_id"]
+                or payable["currency"] != binding["currency"]
+                or payable["inv_id"] != entry["cause_id"]
+                or original <= 0
+                or current <= 0
+                or payable["status"] not in ("open", "scheduled", "held")
+                or str(payable["held_reason"] or "").startswith("retention")
+            ):
+                raise _SettlementRefusal(
+                    "ledger_obligation_mismatch",
+                    f"vendor, currency, invoice, sign or payable status does not match {payable_id}",
+                )
+            if claimed > current:
+                raise _SettlementRefusal(
+                    "coverage_exceeds_obligation",
+                    f"coverage exceeds the outstanding ledger amount for {payable_id}",
+                )
+            limit = self._con.execute(
+                "SELECT * FROM bank_obligation_limits WHERE payable_id = ?", (payable_id,)
+            ).fetchone()
+            identity = (
+                binding["vendor_id"],
+                payable["inv_id"],
+                payable["entry_id"],
+                binding["currency"],
+                kind,
+            )
+            if limit is None:
+                capacity = min(current, original)
+                try:
+                    self._con.execute(
+                        "INSERT INTO bank_obligation_limits(payable_id,vendor_id,invoice_id,entry_id,currency,kind,capacity_minor,consumed_minor) VALUES (?,?,?,?,?,?,?,0)",
+                        (payable_id, *identity, capacity),
+                    )
+                except sqlite3.IntegrityError as exc:
+                    raise _SettlementRefusal(
+                        "ledger_obligation_mismatch",
+                        "originating journal liability already belongs to another payable identity",
+                    ) from exc
+                consumed = 0
+            else:
+                recorded = tuple(
+                    limit[k] for k in ("vendor_id", "invoice_id", "entry_id", "currency", "kind")
+                )
+                if identity != recorded:
+                    raise _SettlementRefusal(
+                        "ledger_obligation_mismatch",
+                        f"the recorded identity of {payable_id} changed",
+                    )
+                capacity, consumed = int(limit["capacity_minor"]), int(limit["consumed_minor"])
+            if claimed > capacity - consumed:
+                raise _SettlementRefusal(
+                    "coverage_already_consumed",
+                    f"cumulative coverage exceeds the bank's immutable capacity for {payable_id}",
+                )
+            self._con.execute(
+                "UPDATE bank_obligation_limits SET consumed_minor = consumed_minor + ? WHERE payable_id = ?",
+                (claimed, payable_id),
+            )
+            self._con.execute(
+                "INSERT INTO bank_obligation_consumptions(pay_id,payable_id,amount_minor) VALUES (?,?,?)",
+                (pay_id, payable_id, claimed * direction),
+            )
 
     def _native_mismatch(
         self, eur_minor: int, native_minor: int, currency: str, req: dict[str, Any]

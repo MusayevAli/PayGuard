@@ -17,6 +17,7 @@ class SignResult:
     reason_code: int | None = None
     payload: bytes = b""
     latency_ms: int = 0
+    authorization: dict[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -40,9 +41,10 @@ class ChipStatus:
     key_loaded: bool
     nonce_timeout_days: int
     slots: list[SlotInfo] = field(default_factory=list)
+    hardware: dict[str, object] | None = None
 
     def to_json(self) -> dict[str, object]:
-        return {
+        result: dict[str, object] = {
             "kind": self.kind,
             "seq": self.seq,
             "day": self.day,
@@ -63,6 +65,9 @@ class ChipStatus:
                 for s in self.slots
             ],
         }
+        if self.hardware is not None:
+            result["hardware"] = self.hardware
+        return result
 
 
 class Signer(Protocol):

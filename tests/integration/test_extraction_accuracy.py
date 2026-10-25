@@ -4,6 +4,7 @@ Needs Anthropic credentials; the extraction cache makes reruns free."""
 
 from __future__ import annotations
 
+import os
 import random
 from collections import defaultdict
 from pathlib import Path
@@ -50,7 +51,9 @@ def test_extraction_accuracy_on_60_documents(
 
     vendors.seed_from_suppliers(suppliers, now=datetime(2026, 10, 1, tzinfo=UTC))
     index = VendorIndex(suppliers, vendors)
-    llm = LLMClient(world_dir.parent / "extraction_cache.db")
+    llm = LLMClient(
+        Path(os.environ.get("PAYGUARD_TEST_LLM_CACHE", world_dir.parent / "extraction_cache.db"))
+    )
     events = {e.payload["invoice_id"]: e for e in world_events if e.type == "invoice_received"}
     docs = sample_documents(invoices)
     assert len(docs) == 60 and len({d.template_id for d in docs}) == 8

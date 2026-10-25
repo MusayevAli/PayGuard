@@ -11,6 +11,7 @@ from email.message import EmailMessage
 from email.policy import SMTP
 from email.utils import format_datetime, formataddr
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from sim.models import Attachment, Invoice, InvoiceFormat, Language, Supplier
 from sim.templates.base import LineView, Party, RenderContext, VatRow, render_pdf
@@ -692,12 +693,19 @@ def _days(n: int):
 def render_documents(
     rng: random.Random, world: World, out_dir: Path
 ) -> tuple[list[Invoice], dict[str, dict[str, str]], dict[str, int]]:
+    # Intermediate PDFs are private to this invocation, outside the generated
+    # artifact tree. Cleanup also runs if rendering one of the scans fails.
+    with TemporaryDirectory(prefix="payguard-documents-") as staging:
+        return _render_documents(rng, world, out_dir, Path(staging))
+
+
+def _render_documents(
+    rng: random.Random, world: World, out_dir: Path, tmp_dir: Path
+) -> tuple[list[Invoice], dict[str, dict[str, str]], dict[str, int]]:
     inv_dir = out_dir / "invoices"
     eml_dir = out_dir / "emails"
-    tmp_dir = out_dir / ".tmp"
     inv_dir.mkdir(parents=True, exist_ok=True)
     eml_dir.mkdir(parents=True, exist_ok=True)
-    tmp_dir.mkdir(parents=True, exist_ok=True)
     invoices: list[Invoice] = []
     email_meta: dict[str, dict[str, str]] = {}
     sizes: dict[str, int] = {}
@@ -776,5 +784,4 @@ def render_documents(
                 sha256=hashlib.sha256(content).hexdigest(),
             )
         )
-    tmp_dir.rmdir()
     return invoices, email_meta, sizes

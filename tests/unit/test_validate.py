@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import date
 
+import pytest
+
 from agents.parsed import LocaleHints, ParsedInvoice, ParsedLine
 from agents.validate import normalize_currency, parse_date, validate_parsed
 
@@ -44,6 +46,38 @@ CS = LocaleHints(
     supplier_id="V-0001",
     currency="EUR",
 )
+
+
+@pytest.mark.parametrize(
+    ("notes", "expected_bp"),
+    [
+        (
+            "Odwrotne obciążenie. Stawka 0 % (art. 42 ustawy o VAT). "
+            "Kaucja gwarancyjna 10 % wartości faktury, zwalniana po odbiorze końcowym narzędzia.",
+            1000,
+        ),
+        ("VAT 21%; 7,25 % retention until acceptance.", 725),
+        ("VAT 0% and 20% retention until acceptance", 2000),
+        ("10% retention and VAT 21%", 1000),
+        ("Einbehalt 15 %. Skonto 2 %.", 1500),
+        ("VAT 21%; retention until acceptance.", 1000),
+        ("100% holdback until acceptance", 10000),
+        ("VAT 21%; 2% early payment discount", None),
+    ],
+)
+def test_retention_uses_its_clause_not_an_unrelated_vat_or_discount_rate(
+    notes: str, expected_bp: int | None
+) -> None:
+    invoice, errors = validate_parsed(parsed(notes=notes), CS)
+    assert errors == [] and invoice is not None
+    assert invoice.retention_bp == expected_bp
+
+
+@pytest.mark.parametrize("notes", ["Retention 110%", "Holdback 7.255%"])
+def test_invalid_retention_percentage_holds_validation(notes: str) -> None:
+    invoice, errors = validate_parsed(parsed(notes=notes), CS)
+    assert invoice is None
+    assert any("retention percentage" in error for error in errors)
 
 
 def test_happy_path_under_the_supplier_locale() -> None:

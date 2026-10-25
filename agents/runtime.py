@@ -5,6 +5,7 @@ provisioning, the agents, the runner and the scoreboard."""
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -28,7 +29,7 @@ from core.ledger import Ledger
 from core.packets import PacketStore
 from core.policy import Policy
 from core.score import Scoreboard, scoreboard_from_world
-from core.vendors import VendorMaster
+from core.vendors import VendorMaster, account_hash
 from signer.interface import Signer
 from signer.provisioning import Provisioner, chip_key
 from signer.stub import StubSigner
@@ -120,6 +121,17 @@ def build_runtime(
     cache_db: Path | None = None,
     beancount_path: Path | None = None,
 ) -> Runtime:
+    signer_kind = os.environ.get("SIGNER", "stub")
+    if signer_kind not in ("stub", "hw"):
+        raise ValueError("SIGNER must be stub or hw; no automatic fallback is allowed")
+    if signer_kind == "hw" and auto_controller:
+        raise ValueError("Hardware mode requires an authenticated human controller")
+    if signer is not None and signer.kind != signer_kind:
+        raise ValueError("Injected signer kind must match the explicit SIGNER mode")
+    if signer is None and signer_kind == "hw":
+        from signer.hardware import HardwareSigner
+
+        signer = HardwareSigner.from_env(db_path)
     world_dir = Path(world_dir)
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -156,7 +168,16 @@ def build_runtime(
     chip: Signer = signer if signer is not None else StubSigner(db_path, jumper_present=jumper)
     key = chip_key()
     bank = MockBank(
-        db_path, store=store, key=key, fx=fx, now=now, schedule=clock.schedule, out_dir=out_dir
+        db_path,
+        store=store,
+        key=key,
+        fx=fx,
+        now=now,
+        schedule=clock.schedule,
+        out_dir=out_dir,
+        hardware_response_key=getattr(chip, "response_key", None),
+        hardware_session=getattr(chip, "session", None),
+        require_hardware_authorization=chip.kind == "hw",
     )
     provisioner = Provisioner(
         db_path,
@@ -285,14 +306,35 @@ def start_runtime(rt: Runtime, *, provision: bool = True) -> BootstrapResult:
     """Opening balances and vendor master (idempotent), then the pre-demo provisioning of every
     active approved account with the jumper present, after which the jumper is pulled."""
     result = bootstrap(rt.ledger, rt.store, rt.vendors, suppliers=rt.suppliers)
-    if rt.payment_agent is not None and provision:
+    hardware = rt.signer.kind == "hw"
+    approved_provision = not hardware or os.environ.get("PAYGUARD_HW_PROVISION") == "1"
+    if rt.payment_agent is not None and provision and approved_provision:
+        begin_fixtures = getattr(rt.signer, "begin_fixture_onboarding", None) if hardware else None
+        end_fixtures = getattr(rt.signer, "end_fixture_onboarding", None) if hardware else None
+        if hardware and (not callable(begin_fixtures) or not callable(end_fixtures)):
+            raise RuntimeError("hardware signer lacks explicit synthetic-fixture onboarding scope")
         rt.jumper.present = True
         try:
-            if not rt.signer.status().key_loaded:
+            if begin_fixtures is not None:
+                # Only the reviewed synthetic fixture's original ID/account pairs.
+                # Never infer a fixture exception from a newly edited vendor record.
+                begin_fixtures(
+                    {
+                        supplier.id: account_hash(
+                            supplier.iban or VendorMaster._local_identifier(supplier)
+                        )
+                        for supplier in rt.suppliers
+                    }
+                )
+            if not hardware and not rt.signer.status().key_loaded:
                 rt.provisioner.load_key_and_caps()
             rt.provisioner.provision_all()
         finally:
-            rt.jumper.present = False
+            try:
+                if end_fixtures is not None:
+                    end_fixtures()
+            finally:
+                rt.jumper.present = False
     log.info(
         "runtime_started",
         entries_posted=result.entries_posted,

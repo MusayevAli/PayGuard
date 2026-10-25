@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import re
 from datetime import date, datetime
+from decimal import Decimal
 
 from core.money import parse_locale_amount
 from core.rules import RETENTION_BP, ROUNDING_TOL_MINOR
@@ -204,6 +205,11 @@ def validate_parsed(
     )
     if parsed.prepayment_amount and prepayment is None:
         errors.append(f"prepayment_amount {parsed.prepayment_amount!r} is not an amount")
+    try:
+        retained_bp = retention_bp_from(parsed.notes, parsed.payment_terms)
+    except ValueError as exc:
+        errors.append(str(exc))
+        retained_bp = None
     if errors or net is None or vat is None or gross is None or invoice_date is None:
         return None, errors
     return ValidatedInvoice(
@@ -227,7 +233,7 @@ def validate_parsed(
         payment_terms=parsed.payment_terms,
         prepayment_minor=abs(prepayment) if prepayment is not None else None,
         notes=parsed.notes,
-        retention_bp=retention_bp_from(parsed.notes, parsed.payment_terms),
+        retention_bp=retained_bp,
         number_locale=locale,
         date_format=date_format,
         source=parsed.source,
@@ -235,17 +241,32 @@ def validate_parsed(
     ), []
 
 
-_RETENTION = re.compile(r"(retention|holdback|einbehalt|zádržn|zatrzyman|留保|kauce)", re.I)
-_PERCENT = re.compile(r"(\d{1,2}(?:[.,]\d)?)\s*%")
+_RETENTION = re.compile(
+    r"(retention|holdback|einbehalt|zádržn|zatrzyman|留保|kauce|kaucj\w*\s+gwarancyjn\w*)", re.I
+)
+_PERCENT = re.compile(r"(?<![\d.,])(\d+(?:[.,]\d+)?)\s*%")
+_CLAUSE_BREAK = re.compile(r"[;\n]|(?<!\d)[.,]|[.,](?!\d)")
 
 
 def retention_bp_from(*texts: str | None) -> int | None:
     """Basis points withheld when the document states a retention clause (R15); the printed
     percentage wins, otherwise the contractual default of ``RETENTION_BP``."""
     for text in texts:
-        if text and _RETENTION.search(text):
-            m = _PERCENT.search(text)
-            if m:
-                return round(float(m.group(1).replace(",", ".")) * 100)
-            return RETENTION_BP
+        for clause in _CLAUSE_BREAK.split(text or ""):
+            cue = _RETENTION.search(clause)
+            if cue is None:
+                continue
+            percentages = list(_PERCENT.finditer(clause))
+            if not percentages:
+                return RETENTION_BP
+            # Notes also contain VAT and discount rates. Use the percentage
+            # nearest the retention wording in its own clause, on either side.
+            match = min(
+                percentages,
+                key=lambda m: max(cue.start() - m.end(), m.start() - cue.end(), 0),
+            )
+            basis_points = Decimal(match.group(1).replace(",", ".")) * 100
+            if not 0 <= basis_points <= 10000 or basis_points != basis_points.to_integral_value():
+                raise ValueError("retention percentage must be 0..100 with at most two decimals")
+            return int(basis_points)
     return None

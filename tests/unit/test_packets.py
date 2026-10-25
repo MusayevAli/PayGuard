@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from threading import Barrier
 
 import pytest
 
@@ -99,6 +101,91 @@ def test_decide_is_idempotent_and_emits_one_controller_decision(
     assert len(store.query(type="controller_decision")) == 1
     assert packets.get(pk.id).status == "decided" and packets.get(pk.id).decision == first
     assert packets.open_packets() == []
+
+
+def test_conflicting_concurrent_decisions_publish_only_the_persisted_winner(
+    store: EventStore, packets: PacketStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two independent connections both read an undecided packet before racing."""
+    pk = packets.create_packet(sample(store))
+    other_events = EventStore(tmp_path / "payguard.db")
+    other = PacketStore(tmp_path / "payguard.db", events=other_events, now=lambda: NOW)
+    both_read = Barrier(2)
+
+    def race_read(owner: PacketStore) -> None:
+        original = owner.get
+        first = True
+
+        def get(packet_id: str):
+            nonlocal first
+            result = original(packet_id)
+            if first:
+                first = False
+                both_read.wait(timeout=5)
+            return result
+
+        monkeypatch.setattr(owner, "get", get)
+
+    race_read(packets)
+    race_read(other)
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            approve = pool.submit(packets.decide_packet, pk.id, "approve", "A", "alice")
+            deny = pool.submit(other.decide_packet, pk.id, "deny", "B", "bob")
+            first, second = approve.result(timeout=10), deny.result(timeout=10)
+        assert first == second == packets.get(pk.id).decision
+        events = store.query(type="controller_decision")
+        assert len(events) == 1
+        assert events[0].id == first.event_id
+        assert events[0].payload["decision"] == first.decision
+    finally:
+        other.close()
+        other_events.close()
+
+
+def test_restart_publishes_a_committed_decision_after_event_write_failed(
+    store: EventStore, packets: PacketStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pk = packets.create_packet(sample(store))
+    original = store.append
+
+    def interrupted(event):
+        if event.type == "controller_decision":
+            raise OSError("simulated interruption before event persistence")
+        return original(event)
+
+    monkeypatch.setattr(store, "append", interrupted)
+    with pytest.raises(OSError, match="interruption"):
+        packets.decide_packet(pk.id, "deny", "Keep the account held", "alice")
+    committed = packets.get(pk.id).decision
+    assert committed is not None and committed.decision == "deny"
+    assert store.query(type="controller_decision") == []
+    monkeypatch.setattr(store, "append", original)
+
+    restarted = PacketStore(tmp_path / "payguard.db", events=store, now=lambda: NOW)
+    try:
+        assert restarted.decide_packet(pk.id, "approve", None, "bob") == committed
+        decisions = store.query(type="controller_decision")
+        assert len(decisions) == 1 and decisions[0].id == committed.event_id
+        assert decisions[0].payload["decision"] == "deny"
+    finally:
+        restarted.close()
+
+
+def test_decision_subscriber_observes_the_committed_packet(
+    store: EventStore, packets: PacketStore
+) -> None:
+    pk = packets.create_packet(sample(store))
+    observed = []
+    unsubscribe = store.subscribe(
+        lambda event: observed.append(packets.get(event.payload["packet_id"]).decision),
+        types={"controller_decision"},
+    )
+    try:
+        result = packets.decide_packet(pk.id, "deny", None, "alice")
+        assert observed == [result]
+    finally:
+        unsubscribe()
 
 
 def test_decide_rejects_unknown_option_and_unknown_packet(

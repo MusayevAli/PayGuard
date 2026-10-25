@@ -1,0 +1,29 @@
+{
+  "revision": "r3-overlay-only",
+  "physical_board_verified": false,
+  "unchanged_image_baseline": "payguard-kv260-20261025/build-r2",
+  "baseline_source_sha256": "08eecdfd5edef1587d17d1ebc6eeef0f0abac6232baa127a08a81307d43ff8e2",
+  "aficonfig": {
+    "register": 14,
+    "value": 0,
+    "active_hpm0_fpd_width_bits": 32,
+    "disabled_hpm1_fpd_width_bits": 32,
+    "reset_id": 116
+  },
+  "clock_hz": 50000000,
+  "files": {
+    "vivado/package_overlay.tcl": {
+      "bytes": 3974,
+      "sha256": "9bcc1264c97bba9569110712632f66b83d9dd2439f45edd0719539f8448fb4c2"
+    },
+    "recovery/r3/siliconsign.dts": {
+      "bytes": 1260,
+      "sha256": "1ba3a5894fd82f118d82cd9b87a97113dcd11e3762368d9030b19d51bfb0695b"
+    },
+    "recovery/r3/siliconsign.dtbo": {
+      "bytes": 1347,
+      "sha256": "4b584849ba1a8d7bd808f1427632db4c73b8f62ac0a40affd6e3a24b43cad7ba"
+    }
+  },
+  "validation": "DTC compilation and fdtoverlay synthetic-base resolution passed; FPGA image and physical board not exercised."
+}

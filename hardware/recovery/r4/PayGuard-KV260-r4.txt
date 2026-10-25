@@ -1,0 +1,321 @@
+sudo python3 - <<'PAYGUARD_RECOVERY_R4'
+PAYLOAD_SHA256 = (
+    '9eb3360a75aecb1ca9e681240c4d52e9f873fe8fea71fe5ce3df85aad69f50ad'
+)
+PAYLOAD = """
+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
+"""
+import base64, gzip, hashlib, json, os, stat, subprocess, sys, types
+from pathlib import Path
+
+TARGET = Path("/opt/payguard-recovery-r4")
+ORIGINAL = Path("/opt/payguard-kv260")
+EXPECTED_NAMES = {
+    "deploy_kv260.py", "build/siliconsign.dts",
+    "build/siliconsign.dtbo", "manifest.json",
+}
+
+def phase(message):
+    print("[PayGuard r4] " + message, flush=True)
+
+def require(condition, message):
+    if not condition:
+        raise RuntimeError(message)
+
+def safe_read(path, limit=268435456):
+    path = Path(path)
+    require(path.is_absolute(), "An absolute path is required")
+    fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in path.parts[1:-1]:
+            next_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY |
+                              os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = next_fd
+            require(os.fstat(fd).st_uid == 0,
+                    "Path directory must be root-owned")
+        source = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW,
+                         dir_fd=fd)
+        with os.fdopen(source, "rb") as handle:
+            info = os.fstat(handle.fileno())
+            require(stat.S_ISREG(info.st_mode) and info.st_uid == 0,
+                    "Input must be a root-owned regular file")
+            require(not info.st_mode & 0o077,
+                    "Input must have owner-only permissions")
+            require(info.st_size <= limit, "Input exceeds size limit")
+            return handle.read(limit + 1)
+    finally:
+        os.close(fd)
+
+def verified(data, record):
+    require(len(data) == record["bytes"], "File size mismatch")
+    require(hashlib.sha256(data).hexdigest() == record["sha256"],
+            "File SHA-256 mismatch")
+    return data
+
+def unpack(encoded, expected):
+    packed = base64.b64decode(encoded, validate=False)
+    require(hashlib.sha256(packed).hexdigest() == expected,
+            "Installer payload SHA-256 mismatch")
+    obj = json.loads(gzip.decompress(packed))
+    require(set(obj) == EXPECTED_NAMES, "Unexpected payload members")
+    files = {}
+    for name, item in obj.items():
+        encoding = item.get("encoding", "base64")
+        require(encoding in ("utf-8", "base64"), "Unknown encoding")
+        data = (item["data"].encode("utf-8") if encoding == "utf-8"
+                else base64.b64decode(item["data"], validate=True))
+        files[name] = verified(data, item)
+    return files
+
+def write_new(path, data):
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                 os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(data)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+def run(encoded, expected):
+    require(os.geteuid() == 0, "Run this installer through sudo")
+    os.umask(0o077)
+    phase("Verify the public recovery payload before parsing code")
+    files = unpack(encoded, expected)
+    helper = types.ModuleType("payguard_recovery_deploy")
+    helper.__file__ = str(TARGET / "deploy_kv260.py")
+    sys.modules[helper.__name__] = helper
+    exec(compile(files["deploy_kv260.py"], helper.__file__, "exec"),
+         helper.__dict__)
+    phase("Read-only board, kernel and overlay preflight")
+    info = helper.inspection()
+    print(json.dumps(info, indent=2), flush=True)
+    helper.require_board(info)
+    helper.require_kernel_ready()
+    overlays = helper.active_overlays()
+    starter = [{"name": "k26-starter-kits_image_1",
+                "status": "applied"}]
+    require(overlays in ([], starter),
+            "Unexpected overlay; stop. No overlay has been unloaded.")
+    phase("Verify the existing private image against its old manifest")
+    manifest = json.loads(safe_read(ORIGINAL / "manifest.json", 1048576))
+    image_name = "build/siliconsign.bit.bin"
+    image = verified(safe_read(ORIGINAL / image_name),
+                     manifest["files"][image_name])
+    files[image_name] = image
+    if TARGET.exists() or TARGET.is_symlink():
+        for name, data in files.items():
+            require(safe_read(TARGET / name) == data,
+                    "Existing recovery target differs; preserved")
+        phase("Matching target exists: INSPECTION ONLY; no reload")
+        return
+    phase("Check installed clock and AFI platform drivers")
+    modules = {"xilinx_fclk": "xilinx_fclk", "afi-fpga": "xilinx_afi"}
+    for driver, present in helper.required_drivers().items():
+        if not present:
+            require(driver in modules, "Unknown required driver")
+            subprocess.run(["modprobe", modules[driver]], check=True)
+    helper.require_platform_drivers()
+    helper.require_kernel_ready()
+    require(helper.active_overlays() == overlays,
+            "Overlay state changed during preflight; stopped")
+    phase("Create a separate private recovery directory")
+    # ORIGINAL inspection already checked /opt without following symlinks.
+    TARGET.mkdir(mode=0o700)
+    (TARGET / "build").mkdir(mode=0o700)
+    for name, data in files.items():
+        write_new(TARGET / name, data)
+    if overlays == starter:
+        phase("Unload only the confirmed starter-kit application")
+        subprocess.run(["xmutil", "unloadapp"], check=True)
+    require(helper.active_overlays() == [],
+            "An overlay remains; stopped before recovery image load")
+    helper.require_kernel_ready()
+    phase("Load corrected overlay only; NO PL MMIO or payment bridge")
+    result = helper.deploy(TARGET / "build", True, load_only=True)
+    print(json.dumps(result, indent=2), flush=True)
+    phase("Load-only completed: UNVERIFIED. Original installation kept.")
+
+try:
+    run(PAYLOAD, PAYLOAD_SHA256)
+except Exception as error:
+    print("[PayGuard r4] STOPPED: " + str(error), file=sys.stderr,
+          flush=True)
+    raise SystemExit(1)
+PAYGUARD_RECOVERY_R4

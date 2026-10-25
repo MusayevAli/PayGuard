@@ -3,7 +3,9 @@
 ``speed`` is sim-seconds per real-second (default 8640 = one sim day per ten real seconds).
 World events are inserted into the store when ``sim_now >= known_at``; a ``day_boundary``
 event is emitted at every sim midnight (including the start instant when it is midnight).
-``step`` advances exactly one day synchronously. Pausing stops the real-time loop.
+``step`` advances exactly one day synchronously. Agent processing time is excluded
+from automatic advancement. Time and scheduled deliveries survive restart; the
+clock always starts paused. Pausing stops future ticks, not work already running.
 """
 
 from __future__ import annotations
@@ -61,7 +63,7 @@ class SimClock:
             raise ValueError("start must be timezone-aware")
         self._store = store
         self._start = start.astimezone(UTC)
-        self._sim_now = self._start
+        self._sim_now, delivered_ids = store.restore_clock(self._start, world_events)
         self._speed = DEFAULT_SPEED
         self.set_speed(speed)
         self._running = False
@@ -69,9 +71,16 @@ class SimClock:
         self._last_real = monotonic()
         self._tick_seconds = tick_seconds
         self._lock = threading.RLock()
-        self._pending: list[Event] = sorted(world_events, key=lambda e: (e.known_at, e.id))
+        # Serialize complete advances, including agent work, without holding
+        # the short-lived state/control lock during network calls in the hook.
+        self._advance_lock = threading.RLock()
+        pending = {event.id: event for event in world_events if event.id not in delivered_ids}
+        pending.update({event.id: event for event in store.scheduled_events()})
+        self._pending: list[Event] = sorted(pending.values(), key=lambda e: (e.known_at, e.id))
         self._cursor = 0
-        self._next_boundary = _midnight_on_or_after(self._sim_now)
+        # Recheck boundaries from the original origin. Existing events deduplicate;
+        # a legacy/crash recovery must not silently skip an unrecorded earlier one.
+        self._next_boundary = _midnight_on_or_after(self._start)
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self.after_advance: Callable[[list[Event]], None] | None = None
@@ -133,28 +142,42 @@ class SimClock:
 
     def step(self) -> StepResult:
         """Advance exactly one sim day and insert everything that became known, synchronously."""
-        with self._lock:
-            start = self._sim_now
-            end = start + ONE_DAY
+        with self._advance_lock:
+            with self._lock:
+                start = self._sim_now
+                end = start + ONE_DAY
             inserted = self.advance_to(end)
-            self._last_real = self._monotonic()
+            with self._lock:
+                self._last_real = self._monotonic()
             return StepResult(start=start, end=end, inserted=inserted)
 
     def tick(self) -> list[Event]:
         """Advance by the real time elapsed since the last tick, scaled by ``speed``."""
-        with self._lock:
-            now_real = self._monotonic()
-            if not self._running:
+        with self._advance_lock:
+            with self._lock:
+                now_real = self._monotonic()
+                if not self._running:
+                    self._last_real = now_real
+                    return []
+                elapsed = max(0.0, now_real - self._last_real)
                 self._last_real = now_real
-                return []
-            elapsed = max(0.0, now_real - self._last_real)
-            self._last_real = now_real
-            target = self._sim_now + timedelta(seconds=elapsed * self._speed)
-            return self.advance_to(target)
+                target = self._sim_now + timedelta(seconds=elapsed * self._speed)
+            try:
+                return self.advance_to(target)
+            finally:
+                with self._lock:
+                    # A slow model call must not become several days of new
+                    # arrivals on the following tick. Count idle pacing only.
+                    self._last_real = self._monotonic()
 
     def advance_to(self, target: datetime) -> list[Event]:
         """Move sim time forward to ``target`` (never backwards), inserting in known_at order
         and emitting day boundaries as midnights are crossed."""
+        with self._advance_lock:
+            return self._advance_to(target)
+
+    def _advance_to(self, target: datetime) -> list[Event]:
+        """Called with the advance lock; callbacks must not retain the state lock."""
         target = target.astimezone(UTC)
         inserted: list[Event] = []
         with self._lock:
@@ -174,10 +197,12 @@ class SimClock:
                     self._emit_boundary(inserted)
                     continue
                 assert next_event is not None
-                self._cursor += 1
                 result = self._store.append(next_event)
+                self._store.finish_scheduled_event(next_event.id)
+                self._cursor += 1
                 if result.inserted:
                     inserted.append(result.event)
+            self._store.checkpoint_clock(self._start, target)
             self._sim_now = target
         hook = self.after_advance
         if hook is not None:
@@ -188,6 +213,8 @@ class SimClock:
         """Queue a future event (a colleague reply, a scheduled receipt). It is inserted when
         ``sim_now`` reaches its ``known_at`` like any world event; past-dated events go next."""
         with self._lock:
+            if not self._store.schedule_event(ev):
+                return
             tail = self._pending[self._cursor :]
             tail.append(ev)
             tail.sort(key=lambda e: (e.known_at, e.id))

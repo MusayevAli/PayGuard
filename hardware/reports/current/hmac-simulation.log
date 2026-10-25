@@ -1,0 +1,7 @@
+PASS HMAC vector 0 (528 cycles)
+PASS HMAC vector 1 (528 cycles)
+PASS HMAC vector 2 (528 cycles)
+PASS HMAC vector 3 (528 cycles)
+PASS HMAC vector 1 (528 cycles)
+PASS: 5 HMAC vectors, input snapshot, busy-start, pulse, reset/recovery
+/workspace/scratch/8b5e39b61ee0/PayGuard/hardware/sim/tb_hmac.sv:88: $finish called at 26810000 (1ps)

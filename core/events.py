@@ -33,6 +33,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS ix_events_content_hash ON events(content_hash)
 CREATE TABLE IF NOT EXISTS agent_cursors (
   agent TEXT, event_id TEXT, handled_at TEXT, PRIMARY KEY(agent, event_id)
 );
+CREATE TABLE IF NOT EXISTS simulation_clock (
+  singleton INTEGER PRIMARY KEY CHECK(singleton = 1), start TEXT NOT NULL, sim_now TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS scheduled_events (
+  event_id TEXT PRIMARY KEY, event_json TEXT NOT NULL
+);
 CREATE TRIGGER IF NOT EXISTS trg_events_no_update BEFORE UPDATE ON events
 BEGIN SELECT RAISE(ABORT, 'events is append-only: UPDATE forbidden'); END;
 CREATE TRIGGER IF NOT EXISTS trg_events_no_delete BEFORE DELETE ON events
@@ -216,6 +222,132 @@ class EventStore:
                 self._con.execute("SELECT 1 FROM events WHERE id = ?", (event_id,)).fetchone()
                 is not None
             )
+
+    # -- durable simulation time and future deliveries -----------------------------------
+
+    def restore_clock(
+        self, start: datetime, world_events: Collection[Event]
+    ) -> tuple[datetime, set[str]]:
+        """Recover from checkpoints and recorded clock activity, never document dates.
+
+        Legacy databases have no checkpoint. Delivered world arrival times, runner
+        cursor times and clock/agent/score envelopes establish a conservative lower
+        bound. Looking at those records also covers a crash during event insertion
+        before the next checkpoint. Future scheduled events are deliberately excluded.
+        """
+        if start.tzinfo is None:
+            raise ValueError("clock start must be timezone-aware")
+        start = start.astimezone(UTC)
+        world = {event.id: event for event in world_events}
+        with self._lock:
+            checkpoint = self._con.execute("SELECT start, sim_now FROM simulation_clock").fetchone()
+            if checkpoint and datetime.fromisoformat(checkpoint["start"]) != start:
+                raise ValueError("existing simulation clock has a different start")
+            times = [start]
+            if checkpoint:
+                times.append(datetime.fromisoformat(checkpoint["sim_now"]))
+            rows = self._con.execute(
+                "SELECT id, type, source, event_time, known_at, content_hash FROM events"
+            ).fetchall()
+            recorded_ids = {row["id"] for row in rows}
+            trusted_pairs = {
+                ("day_boundary", "clock"),
+                ("agent_action", "agent"),
+                ("score_update", "scoreboard"),
+                ("colleague_reply", "people"),
+                ("timer", "vendor_agent"),
+                ("bank_statement", "bank"),
+                ("bank_statement_line", "bank"),
+            }
+            for row in rows:
+                expected = world.get(row["id"])
+                if expected is not None and (
+                    row["content_hash"] != content_hash(expected.type, expected.payload)
+                    or datetime.fromisoformat(row["event_time"]) != expected.event_time
+                    or datetime.fromisoformat(row["known_at"]) != expected.known_at
+                ):
+                    raise EventConflict(f"world event {expected.id} differs from recorded history")
+                if expected is not None or (row["type"], row["source"]) in trusted_pairs:
+                    times.append(datetime.fromisoformat(row["known_at"]))
+            times.extend(
+                datetime.fromisoformat(row[0])
+                for row in self._con.execute("SELECT handled_at FROM agent_cursors")
+            )
+        # ISO strings with/without fractional seconds do not sort chronologically.
+        recovered = max(times)
+        self.checkpoint_clock(start, recovered)
+        return recovered, recorded_ids
+
+    def checkpoint_clock(self, start: datetime, sim_now: datetime) -> None:
+        if start.tzinfo is None or sim_now.tzinfo is None or sim_now < start:
+            raise ValueError("clock checkpoint must contain aware, ordered timestamps")
+        with self._lock:
+            self._con.execute("BEGIN IMMEDIATE")
+            try:
+                prior = self._con.execute("SELECT start, sim_now FROM simulation_clock").fetchone()
+                if prior and (
+                    datetime.fromisoformat(prior["start"]) != start
+                    or datetime.fromisoformat(prior["sim_now"]) > sim_now
+                ):
+                    raise ValueError("clock checkpoint cannot change start or move backwards")
+                self._con.execute(
+                    "INSERT INTO simulation_clock(singleton, start, sim_now) VALUES (1,?,?) "
+                    "ON CONFLICT(singleton) DO UPDATE SET sim_now=excluded.sim_now",
+                    (_iso(start), _iso(sim_now)),
+                )
+                self._con.execute("COMMIT")
+            except BaseException:
+                if self._con.in_transaction:
+                    self._con.execute("ROLLBACK")
+                raise
+
+    def schedule_event(self, event: Event) -> bool:
+        """Persist a future delivery before its caller can report it scheduled."""
+        event = event.model_copy(update={"seq": None})
+        encoded = canonical_json(event.model_dump(mode="json"))
+        with self._lock:
+            self._con.execute("BEGIN IMMEDIATE")
+            try:
+                delivered = self._con.execute(
+                    "SELECT content_hash FROM events WHERE id=?", (event.id,)
+                ).fetchone()
+                queued = self._con.execute(
+                    "SELECT event_json FROM scheduled_events WHERE event_id=?", (event.id,)
+                ).fetchone()
+                if delivered and delivered["content_hash"] != content_hash(
+                    event.type, event.payload
+                ):
+                    raise EventConflict(
+                        f"event id {event.id} already exists with different content"
+                    )
+                if queued and queued["event_json"] != encoded:
+                    raise EventConflict(
+                        f"scheduled event {event.id} has different content or timing"
+                    )
+                inserted = delivered is None and queued is None
+                if inserted:
+                    self._con.execute(
+                        "INSERT INTO scheduled_events(event_id, event_json) VALUES (?,?)",
+                        (event.id, encoded),
+                    )
+                self._con.execute("COMMIT")
+                return inserted
+            except BaseException:
+                if self._con.in_transaction:
+                    self._con.execute("ROLLBACK")
+                raise
+
+    def scheduled_events(self) -> list[Event]:
+        with self._lock:
+            rows = self._con.execute(
+                "SELECT event_json FROM scheduled_events WHERE event_id NOT IN (SELECT id FROM events)"
+            ).fetchall()
+        return [Event.model_validate_json(row[0]) for row in rows]
+
+    def finish_scheduled_event(self, event_id: str) -> None:
+        """Remove queue metadata only after successful idempotent delivery."""
+        with self._lock:
+            self._con.execute("DELETE FROM scheduled_events WHERE event_id=?", (event_id,))
 
     # -- cursors --------------------------------------------------------------------------
 

@@ -1,0 +1,67 @@
+{
+  "scope": "Local software and RTL simulation. Not synthesis or physical-board validation.",
+  "passed": true,
+  "checks": [
+    {
+      "check": "software",
+      "passed": true,
+      "seconds": 1.786,
+      "log": "reports/software.log",
+      "tests": 65
+    },
+    {
+      "check": "hmac_compile",
+      "passed": true,
+      "seconds": 0.02,
+      "log": "build/verification/hmac_compile.log"
+    },
+    {
+      "check": "hmac_simulation",
+      "passed": true,
+      "seconds": 0.151,
+      "log": "build/verification/hmac_simulation.log"
+    },
+    {
+      "check": "policy_compile",
+      "passed": true,
+      "seconds": 0.035,
+      "log": "build/verification/policy_compile.log"
+    },
+    {
+      "check": "policy_simulation",
+      "passed": true,
+      "seconds": 0.039,
+      "log": "build/verification/policy_simulation.log"
+    },
+    {
+      "check": "core_compile",
+      "passed": true,
+      "seconds": 0.288,
+      "log": "build/verification/core_compile.log"
+    },
+    {
+      "check": "core_simulation",
+      "passed": true,
+      "seconds": 0.633,
+      "log": "build/verification/core_simulation.log"
+    },
+    {
+      "check": "axi_compile",
+      "passed": true,
+      "seconds": 0.024,
+      "log": "build/verification/axi_compile.log"
+    },
+    {
+      "check": "axi_simulation",
+      "passed": true,
+      "seconds": 0.053,
+      "log": "build/verification/axi_simulation.log"
+    },
+    {
+      "check": "differential",
+      "passed": true,
+      "seconds": 10.795,
+      "log": "build/verification/differential.log"
+    }
+  ]
+}
