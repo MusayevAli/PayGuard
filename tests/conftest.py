@@ -16,6 +16,27 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SEED = 42
 
 
+@pytest.fixture(autouse=True)
+def _no_credentials_unless_api(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Tests never see the developer's key or .env, so nothing offline can spend money or change
+    behaviour because a key happens to be present. The two API-backed tests carry ``@pytest.mark.api``
+    and keep the real environment."""
+    if request.node.get_closest_marker("api") is not None:
+        return
+    monkeypatch.setenv("PAYGUARD_ENV_FILE", str(REPO_ROOT / "tests" / "no-such.env"))
+    for name in (
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "PAYGUARD_MAX_USD",
+        "PAYGUARD_MODEL",
+        "PAYGUARD_MODEL_TEXT",
+        "PAYGUARD_SPEND_DB",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
 def run_generator(out_dir: Path, seed: int = SEED) -> float:
     """Run the generator in a fresh interpreter; return the wall-clock seconds it took."""
     started = time.perf_counter()

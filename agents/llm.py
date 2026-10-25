@@ -27,6 +27,7 @@ import structlog
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from core.events import canonical_json
+from core.money import UnknownCurrency, minor_digits
 
 from .documents import Document
 from .parsed import ExtractionFailure, ParsedInvoice
@@ -47,7 +48,9 @@ PRICING_PER_MTOK: dict[
     "claude-fable-5-1": (Decimal("10"), Decimal("50"), Decimal("0.025")),
 }
 CACHE_WRITE_FACTOR = Decimal("1.25")
-TEMPERATURE_MODELS = ("claude-haiku-4-5", "claude-sonnet-4-5", "claude-opus-4-5", "claude-3")
+LEGACY_EFFORT_MODELS = ("claude-haiku-4-5", "claude-sonnet-4-5", "claude-opus-4-5", "claude-3")
+"""Models from before the effort parameter. The installed SDK (anthropic 2.x) has no
+``temperature`` argument at all, so these models get no sampling or output options."""
 
 EXTRACTION_SYSTEM = """You are the extraction step of an accounts-payable desk. You read one supplier invoice (images of pages, a scanned image, an e-mail with its attachment, or a JSON export) and record exactly what is printed by calling the record_invoice tool once.
 
@@ -169,7 +172,7 @@ EXTRACTION_TOOL: dict[str, Any] = {
     },
 }
 
-EXPLAIN_SYSTEM = """You write one short, plain-language sentence or two (at most 60 words) explaining a decision an accounts-payable agent already made. Use only the identifiers listed in refs and the facts in inputs/decision; never add new identifiers, amounts or reasons. Write for a finance colleague, present tense, no preamble."""
+EXPLAIN_SYSTEM = """You write one short, plain-language sentence or two (at most 60 words) explaining a decision an accounts-payable agent already made. Use only the identifiers listed in refs and the facts in inputs/decision; never add new identifiers, amounts or reasons. Amounts in the JSON are already formatted with their currency (for example EUR 1,234.00): copy them character for character or leave them out; quantities and percentages likewise as given. Write for a finance colleague, present tense, no preamble."""
 
 MESSAGE_SYSTEM = """You rewrite a short internal business message in a natural, courteous tone. Keep every identifier, amount, quantity and date from the facts exactly as given, add nothing new, and stay under 90 words. Return only the message text."""
 
@@ -191,6 +194,18 @@ class LLMUnavailable(RuntimeError):
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def extraction_cache_path() -> Path:
+    """One persistent extraction cache per machine (``PAYGUARD_EXTRACTION_CACHE``, default
+    ``.cache/extraction_cache.db``). Documents are keyed by content hash and the world generator is
+    deterministic, so the runtime and the API-backed tests pay for each document once, whichever
+    directory the world was generated into."""
+    return Path(
+        os.environ.get("PAYGUARD_EXTRACTION_CACHE") or REPO_ROOT / ".cache" / "extraction_cache.db"
+    )
+
+
 SPEND_SCHEMA = """
 CREATE TABLE IF NOT EXISTS spend (id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT, model TEXT, purpose TEXT, cost_usd TEXT, request_id TEXT NULL);
 """
@@ -263,8 +278,8 @@ class UsageReport(BaseModel):
     by_purpose: dict[str, dict[str, int]]
 
 
-def _supports_temperature(model: str) -> bool:
-    return model.startswith(TEMPERATURE_MODELS)
+def _supports_effort(model: str) -> bool:
+    return not model.startswith(LEGACY_EFFORT_MODELS)
 
 
 def call_cost(
@@ -342,11 +357,84 @@ def template_message(kind: str, facts: dict[str, Any]) -> str:
     return " ".join(f"{k}: {v}" for k, v in f.items())
 
 
-def validate_explanation(text: str, refs: Sequence[str]) -> bool:
+def _find_currency(node: Any) -> str | None:
+    if isinstance(node, dict):
+        for k in ("currency", "settlement_currency", "invoice_currency"):
+            v = node.get(k)
+            if isinstance(v, str) and v:
+                return v
+        for v in node.values():
+            found = _find_currency(v)
+            if found:
+                return found
+    elif isinstance(node, list):
+        for v in node:
+            found = _find_currency(v)
+            if found:
+                return found
+    return None
+
+
+def format_amount(minor: int, currency: str | None) -> str:
+    digits = 2
+    if currency:
+        try:
+            digits = minor_digits(currency)
+        except UnknownCurrency:
+            digits = 2
+    sign = "-" if minor < 0 else ""
+    if digits == 0:
+        body = f"{abs(minor):,}"
+    else:
+        whole, frac = divmod(abs(minor), 10**digits)
+        body = f"{whole:,}.{frac:0{digits}d}"
+    return f"{currency} {sign}{body}" if currency else f"{sign}{body} minor units"
+
+
+def present_for_prose(decision: dict[str, Any]) -> dict[str, Any]:
+    """The decision as the prose model sees it: every ``*_minor`` integer becomes a formatted amount
+    with its currency (``gross_minor: 123400`` → ``gross: "EUR 1,234.00"``), so cents can never be
+    read as whole units. The currency is the nearest one in the same object, else the first one
+    anywhere in the decision."""
+    overall = _find_currency(decision)
+
+    def walk(node: Any, inherited: str | None) -> Any:
+        if isinstance(node, dict):
+            ccy = _find_currency({k: v for k, v in node.items() if isinstance(v, str)}) or inherited
+            out: dict[str, Any] = {}
+            for k, v in node.items():
+                if k.endswith("_minor") and isinstance(v, int) and not isinstance(v, bool):
+                    out[k[: -len("_minor")] or "amount"] = format_amount(v, ccy)
+                else:
+                    out[k] = walk(v, ccy)
+            return out
+        if isinstance(node, list):
+            return [walk(v, inherited) for v in node]
+        return node
+
+    return walk(decision, overall)
+
+
+def validate_explanation(text: str, refs: Sequence[str], facts: str = "") -> bool:
+    """At most 60 words; identifiers only from refs; every formatted number (thousands separator or
+    decimals) copied verbatim from the presented facts, plain integers at least digit for digit."""
     if len(text.split()) > 60:
         return False
     allowed = " ".join(refs)
-    return all(token in allowed for token in ID_PATTERN.findall(text))
+    if not all(token in allowed for token in ID_PATTERN.findall(text)):
+        return False
+    if facts:
+        digit_blob = re.sub(r"\D", "", facts)
+        for amount in AMOUNT_PATTERN.findall(text):
+            digits = re.sub(r"\D", "", amount)
+            if len(digits) < 3:
+                continue
+            formatted = any(ch in amount for ch in ",. ")
+            if formatted and amount.strip() not in facts:
+                return False
+            if not formatted and digits not in digit_blob:
+                return False
+    return True
 
 
 def validate_message(text: str, facts: dict[str, Any]) -> bool:
@@ -392,6 +480,7 @@ class LLMClient:
         self._timeout = timeout
         self._now: Callable[[], datetime] = now or (lambda: datetime.now(UTC))
         self._lock = threading.RLock()
+        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self._con = sqlite3.connect(
             str(db_path), timeout=30.0, check_same_thread=False, isolation_level=None
         )
@@ -549,8 +638,10 @@ class LLMClient:
     # ------------------------------------------------------------------ request shaping
 
     def _kwargs(self, model: str, purpose: str) -> dict[str, Any]:
-        if _supports_temperature(model):
-            return {"temperature": 0}
+        """Request options by model: effort for current models, nothing for older ones. Answers are
+        reproducible through the cache, not through sampling parameters."""
+        if not _supports_effort(model):
+            return {}
         return {"output_config": {"effort": "high" if purpose == "extract" else "low"}}
 
     @staticmethod
@@ -773,18 +864,20 @@ class LLMClient:
         fallback = template_explanation(decision)
         if not self.credentials_available():
             return fallback
-        prompt = "Decision (JSON):\n" + json.dumps(decision, ensure_ascii=False, indent=2)
+        shown = json.dumps(present_for_prose(decision), ensure_ascii=False, indent=2)
+        prompt = "Decision (JSON):\n" + shown
         text: str | None = None
         try:
             for attempt in range(2):
                 extra = (
                     ""
                     if attempt == 0
-                    else "\nYour previous attempt mentioned an identifier not in refs or was too long. Use only these identifiers: "
+                    else "\nYour previous attempt mentioned an identifier not in refs, changed an amount, or was too long. Use only these identifiers: "
                     + ", ".join(refs)
+                    + "; copy amounts exactly as shown."
                 )
                 text = self._text_call("explain", EXPLAIN_SYSTEM, prompt + extra)
-                if text and validate_explanation(text, refs):
+                if text and validate_explanation(text, refs, shown):
                     break
                 text = None
         except LLMUnavailable:

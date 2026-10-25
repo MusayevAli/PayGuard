@@ -71,6 +71,7 @@ warn_required_dynamic_aliases = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra --strict-markers -p no:cacheprovider"
+markers = ["api: calls the Anthropic API for real (needs credentials, spends money)"]
 filterwarnings = [
     "error::DeprecationWarning:payguard.*",
     "ignore:Using .httpx. with .starlette.testclient. is deprecated:Warning",

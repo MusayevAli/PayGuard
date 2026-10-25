@@ -122,8 +122,9 @@ spend is tallied in `.cache/payguard_spend.db` from the API's usage figures and 
 reaches the cap no further call is made (agents fall back to template explanations, extraction
 raises `LLMUnavailable` and the work is held). `PAYGUARD_MODEL` is the extraction model and
 `PAYGUARD_MODEL_TEXT` the model for explanations and persona replies; `.env.example` pairs Opus 5
-with Haiku 4.5. Extractions are cached per document in `sim/extraction_cache.db`, shared by the
-API-backed tests and the runtime, so a document is paid for once.
+with Haiku 4.5. Extractions are cached per document hash in `.cache/extraction_cache.db`
+(`PAYGUARD_EXTRACTION_CACHE`), shared by the API-backed tests and the runtime, so a document is
+paid for once on this machine however often the world is regenerated.
 
 The script bootstraps the ledger, steps the clock one sim day at a time, drains the agents after
 every step, scores against the answer key and prints the scoreboard, API usage and cost. Without

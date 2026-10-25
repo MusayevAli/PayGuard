@@ -11,12 +11,14 @@ from pathlib import Path
 import pytest
 
 from agents.documents import load_document
-from agents.llm import LLMClient
+from agents.llm import LLMClient, extraction_cache_path
 from agents.resolve import VendorIndex
 from agents.validate import validate_parsed
 from core.vendors import VendorMaster
 from sim.models import Event, Invoice, Supplier
 from tests.conftest import load_json
+
+pytestmark = pytest.mark.api  # spends real money; keeps the real environment and .env
 
 FIELDS = ("invoice_number", "invoice_date", "currency", "net_minor", "vat_minor", "gross_minor")
 
@@ -50,7 +52,7 @@ def test_extraction_accuracy_on_60_documents(
 
     vendors.seed_from_suppliers(suppliers, now=datetime(2026, 10, 1, tzinfo=UTC))
     index = VendorIndex(suppliers, vendors)
-    llm = LLMClient(world_dir.parent / "extraction_cache.db")
+    llm = LLMClient(extraction_cache_path())  # persistent: a document is paid for once per machine
     events = {e.payload["invoice_id"]: e for e in world_events if e.type == "invoice_received"}
     docs = sample_documents(invoices)
     assert len(docs) == 60 and len({d.template_id for d in docs}) == 8

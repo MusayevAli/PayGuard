@@ -11,17 +11,34 @@ from typing import Any
 
 import pytest
 
-from agents.llm import LLMClient, LLMUnavailable, load_dotenv
+from agents.llm import (
+    LLMClient,
+    LLMUnavailable,
+    load_dotenv,
+    present_for_prose,
+    validate_explanation,
+)
 
 
 class _Fake:
-    """A stand-in for anthropic.Anthropic: every call answers with a short text and fixed usage."""
+    """A stand-in for anthropic.Anthropic 2.x: ``create`` takes the SDK's keyword arguments only
+    (no ``temperature``), answers with a short text and fixed usage."""
 
     def __init__(self) -> None:
         self.calls = 0
         self.messages = SimpleNamespace(create=self._create)
 
-    def _create(self, **kwargs: Any) -> Any:
+    def _create(
+        self,
+        *,
+        model: str,
+        max_tokens: int,
+        messages: list[Any],
+        system: Any = None,
+        tools: Any = None,
+        tool_choice: Any = None,
+        output_config: Any = None,
+    ) -> Any:
         self.calls += 1
         return SimpleNamespace(
             stop_reason="end_turn",
@@ -109,3 +126,43 @@ def test_dotenv_fills_gaps_without_overriding(
     llm = LLMClient(tmp_path / "e.db", client=_Fake(), spend_db=tmp_path / "s3.db")
     assert llm.max_usd == Decimal("3") and llm.text_model == "claude-haiku-4-5"
     llm.close()
+
+
+def test_request_options_match_the_installed_sdk(tmp_path: Path, key: None) -> None:
+    """anthropic 2.x has no temperature argument: legacy models get no options, current models get
+    an effort level (high for documents, low for prose)."""
+    llm = LLMClient(tmp_path / "f.db", client=_Fake(), spend_db=tmp_path / "s4.db")
+    assert llm._kwargs("claude-haiku-4-5", "explain") == {}
+    assert llm._kwargs("claude-sonnet-4-5", "extract") == {}
+    assert llm._kwargs("claude-opus-5", "extract") == {"output_config": {"effort": "high"}}
+    assert llm._kwargs("claude-opus-5", "explain") == {"output_config": {"effort": "low"}}
+    assert llm._kwargs("claude-sonnet-5", "persona") == {"output_config": {"effort": "low"}}
+    llm.close()
+
+
+def test_prose_sees_formatted_amounts_and_the_validator_rejects_misread_cents() -> None:
+    decision = {
+        "action_type": "posted",
+        "rule_id": "R1",
+        "refs": ["INV-0001", "PO-10001"],
+        "inputs": {"gross_minor": 123400, "currency": "EUR", "qty_billed": 1000},
+        "decision": {"post_minor": -5, "lines": [{"net_minor": 1200, "currency": "JPY"}]},
+    }
+    shown = present_for_prose(decision)
+    assert shown["inputs"] == {"gross": "EUR 1,234.00", "currency": "EUR", "qty_billed": 1000}
+    assert shown["decision"]["post"] == "EUR -0.05", (
+        "the currency is found anywhere in the decision"
+    )
+    assert shown["decision"]["lines"] == [{"net": "JPY 1,200", "currency": "JPY"}]
+    import json
+
+    blob = json.dumps(shown)
+    refs = decision["refs"]
+    assert validate_explanation(
+        "INV-0001 posts EUR 1,234.00 against PO-10001 under R1.", refs, blob
+    )
+    assert validate_explanation("1000 pieces billed on INV-0001.", refs, blob)
+    assert not validate_explanation("The agent posts EUR 123,400 for INV-0001.", refs, blob)
+    assert not validate_explanation("Posted EUR 1,234.00 on INV-0002.", refs, blob), "unknown id"
+    assert not validate_explanation("Paid 999 units on INV-0001.", refs, blob), "unknown number"
+    assert not validate_explanation(" ".join(["word"] * 61), refs, blob)

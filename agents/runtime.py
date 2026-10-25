@@ -14,7 +14,7 @@ from typing import Any
 import structlog
 
 from agents.invoice_agent import InvoiceAgent
-from agents.llm import LLMClient
+from agents.llm import LLMClient, extraction_cache_path
 from agents.payment_agent import PaymentAgent
 from agents.payment_state import PaymentState
 from agents.runner import Runner
@@ -152,12 +152,8 @@ def build_runtime(
         for p in json.loads((world_dir / "people.json").read_text(encoding="utf-8"))
     ]
     owns_llm = llm is None
-    # one extraction cache per world, shared with the API-backed tests: a document is paid for once
-    client = (
-        llm
-        if llm is not None
-        else LLMClient(cache_db or (world_dir.parent / "extraction_cache.db"), now=now)
-    )
+    # one extraction cache per machine, shared with the API-backed tests: a document is paid for once
+    client = llm if llm is not None else LLMClient(cache_db or extraction_cache_path(), now=now)
     chip: Signer = signer if signer is not None else StubSigner(db_path, jumper_present=jumper)
     key = chip_key()
     bank = MockBank(

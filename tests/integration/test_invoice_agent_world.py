@@ -8,8 +8,10 @@ from pathlib import Path
 
 import pytest
 
-from agents.llm import LLMClient
+from agents.llm import LLMClient, extraction_cache_path
 from scripts.run_world import run_world
+
+pytestmark = pytest.mark.api  # spends real money; keeps the real environment and .env
 
 HEADLINE_IN_SCOPE = ("T1", "T2", "T3", "T4", "T5", "T6", "T10")
 
@@ -24,7 +26,7 @@ def test_world_run_through_november_5(world_dir: Path, tmp_path: Path) -> None:
         tmp_path / "run",
         until="2026-11-05",
         agents=("invoice",),
-        cache_db=world_dir.parent / "extraction_cache.db",
+        cache_db=extraction_cache_path(),  # persistent: a document is paid for once per machine
     )
     report = result.report
     by_id = {c.id: c for c in report.cases}

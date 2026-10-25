@@ -363,5 +363,9 @@ Choices the spec left open, with the reasoning. Newest at the bottom of each par
     the async warm-up). Explanations fall back to templates; extraction holds the work. The ledger
     is per key, not per cache database, so the budget survives new runs and new world directories.
     Tests with fake clients pass their own ledger path; the two API-backed tests spend for real and
-    count. The runtime's default extraction cache is `sim/extraction_cache.db`, the file the
-    API-backed tests already use, so the 300 documents are extracted once per world.
+    count. The extraction cache is one persistent file per machine, `.cache/extraction_cache.db`
+    (`PAYGUARD_EXTRACTION_CACHE`), used by the runtime and both API-backed tests: documents are
+    keyed by content hash and the generator is deterministic, so the 300 documents are extracted
+    once however often the world is regenerated into a temporary directory. The prose model sees
+    `*_minor` amounts pre-formatted with their currency (`present_for_prose`) and an explanation
+    that alters a formatted number is rejected and regenerated once, then templated.
