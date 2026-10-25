@@ -13,6 +13,7 @@ import pytest
 from bank.mock_bank import MockBank
 from core.bootstrap import OPENING_BANK_MINOR
 from core.events import EventStore, make_event
+from core.money import Money, convert
 from core.vendors import account_hash
 from signer.frames import PayFrame, encode, hmac_tag
 from sim.models import Event
@@ -43,6 +44,13 @@ class Env:
     def request(
         self, pay_id: str, amount: int, currency: str = "EUR", eur: int | None = None
     ) -> Event:
+        rate_date = date(2026, 10, 6)
+        if currency == "EUR":
+            eur_minor, rate_text, rate_iso = (eur if eur is not None else amount), None, None
+        else:
+            conv = convert(Money(amount, currency), "EUR", rate_date, full_synthetic_fx())
+            eur_minor = eur if eur is not None else conv.money.minor
+            rate_text, rate_iso = str(conv.rate), rate_date.isoformat()
         payload = {
             "pay_id": pay_id,
             "payable_ids": ["AP-000001"],
@@ -51,9 +59,9 @@ class Env:
             "account_masked": "CZ67 **** 0449",
             "amount_minor": amount,
             "currency": currency,
-            "eur_equiv_minor": eur if eur is not None else amount,
-            "fx_rate": None,
-            "rate_date": None,
+            "eur_equiv_minor": eur_minor,
+            "fx_rate": rate_text,
+            "rate_date": rate_iso,
             "requested_by": "payment_agent",
             "frame_hex": None,
         }
@@ -155,8 +163,8 @@ def test_usd_payment_settles_from_the_eur_account_at_the_days_rate(env: Env) -> 
 
 
 def test_insufficient_funds_is_rejected(env: Env) -> None:
-    env.request("PAY-000004", OPENING_BANK_MINOR["PLN"] + 1, "PLN", eur=1)
-    frame = env.frame(1, "PAY-000004", 1, "PLN")
+    ev = env.request("PAY-000004", OPENING_BANK_MINOR["PLN"] + 100, "PLN")
+    frame = env.frame(1, "PAY-000004", ev.payload["eur_equiv_minor"], "PLN")
     assert env.bank.execute(frame, hmac_tag(KEY, frame)).reason == "insufficient_funds"
     assert env.bank.balance("PLN") == OPENING_BANK_MINOR["PLN"]
 
@@ -295,3 +303,26 @@ def test_mt940_round_trip_of_the_banks_statement(env: Env) -> None:
         hashlib.sha256(stmt_ev.payload["mt940"].encode()).hexdigest()
         == hashlib.sha256(write_mt940(parsed).encode()).hexdigest()
     )
+
+
+def test_tampered_request_amount_is_rejected_with_a_system_error(env: Env) -> None:
+    """The frame binds EUR cents; a later payment_requested that claims a different native amount
+    for the same pay_id disagrees with the frame and is refused."""
+    env.request("PAY-000007", 24_500_00, "CZK", eur=100_000)
+    tampered = env.request("PAY-000007", 99_999_99, "CZK", eur=100_000)
+    tampered_payload = dict(tampered.payload)
+    assert tampered_payload["amount_minor"] == 99_999_99
+    frame = env.frame(1, "PAY-000007", 100_000, "CZK")
+    res = env.bank.execute(frame, hmac_tag(KEY, frame))
+    assert not res.ok and res.reason == "amount_mismatch"
+    assert any(
+        e.payload["code"] == "amount_mismatch" and "PAY-000007" in e.payload["refs"]
+        for e in env.store.query(type="system_error")
+    )
+    assert env.bank.balance("CZK") == OPENING_BANK_MINOR["CZK"]
+
+
+def test_native_amount_within_rounding_is_accepted(env: Env) -> None:
+    env.request("PAY-000008", 24_500_00, "CZK", eur=100_000)
+    frame = env.frame(1, "PAY-000008", 100_000, "CZK")
+    assert env.bank.execute(frame, hmac_tag(KEY, frame)).ok

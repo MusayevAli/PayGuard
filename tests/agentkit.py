@@ -19,6 +19,8 @@ from agents.payment_state import PaymentState
 from agents.runner import Runner
 from agents.runtime import JumperFlag
 from agents.state import AgentState
+from agents.vendor_agent import VendorAgent
+from agents.vendor_state import VendorState
 from bank.mock_bank import MockBank
 from core.accounts import expense_account_for_category
 from core.events import EventStore, make_event
@@ -32,7 +34,7 @@ from signer.stub import StubSigner
 from sim.clock import SimClock
 from sim.fx import DayRates, FxTable, SourceWindow
 from sim.models import Event, GoodsReceipt, POLine, PurchaseOrder, Supplier
-from sim.people import Responders, roster
+from sim.people import GroundTruth, People, roster
 from sim.worldgen.catalog import BANK_ACCOUNTS, SKUS
 from sim.worldgen.suppliers import build_suppliers
 
@@ -113,7 +115,9 @@ class Kit:
         *,
         now: datetime = START,
         payments: bool = False,
+        vendor: bool = False,
         bank_opening: dict[str, int] | None = None,
+        overdraft: dict[str, int] | None = None,
         button_threshold: int = BUTTON_THRESHOLD_MINOR,
         daily_cap: int = DAILY_CAP_EUR_MINOR,
     ) -> None:
@@ -146,8 +150,14 @@ class Kit:
         self.state = AgentState(self.db)
         self.llm = FakeLLM()
         self.people = roster()
-        self.responders = Responders(
-            self.people, events_source=self.events_source, clock=self.clock, store=self.store
+        self.ground_truth = GroundTruth(self.db)
+        self.responders = People(
+            self.people,
+            events_source=self.events_source,
+            clock=self.clock,
+            store=self.store,
+            suppliers=self.suppliers,
+            truth_store=self.ground_truth,
         )
         self.agent = InvoiceAgent(
             world_dir=self.world,
@@ -171,6 +181,7 @@ class Kit:
             schedule=self.clock.schedule,
             out_dir=tmp_path,
             opening=bank_opening,
+            overdraft=overdraft,
         )
         self.pay_state = PaymentState(self.db)
         self.provisioner = Provisioner(
@@ -197,8 +208,28 @@ class Kit:
             fx=self.fx,
             now=lambda: self.clock.sim_now,
             provisioner=self.provisioner,
+            overdraft=overdraft,
         )
-        agents: list[Any] = [self.agent] + ([self.payment_agent] if payments else [])
+        self.vendor_state = VendorState(self.db)
+        self.vendor_agent = VendorAgent(
+            store=self.store,
+            ledger=self.ledger,
+            vendors=self.vendors,
+            packets=self.packets,
+            state=self.vendor_state,
+            people=self.responders,
+            suppliers=self.suppliers,
+            payment_state=self.pay_state,
+            invoice_state=self.state,
+            schedule=self.clock.schedule,
+            now=lambda: self.clock.sim_now,
+            provisioner=self.provisioner,
+        )
+        agents: list[Any] = (
+            [self.agent]
+            + ([self.vendor_agent] if vendor else [])
+            + ([self.payment_agent] if payments else [])
+        )
         self.runner = Runner(
             store=self.store,
             policy=self.policy,
@@ -372,10 +403,75 @@ class Kit:
             if kind is None or e.payload.get("kind") == kind
         ]
 
+    def message(
+        self,
+        vendor_id: str | None,
+        channel: str,
+        body: str,
+        *,
+        from_address: str | None = None,
+        claimed_name: str | None = None,
+        iban: str | None = None,
+        bank_name: str | None = None,
+        subject: str = "Change of bank details",
+        thread_id: str | None = None,
+        message_id: str | None = None,
+        in_reply_to: str | None = None,
+        when: datetime | None = None,
+    ) -> Event:
+        """A vendor message as the world or the judge tablet would inject it."""
+        sup = self.by_id.get(vendor_id) if vendor_id else None
+        self._inv_n += 1
+        sender = from_address or (sup.email if sup else "x@unknown.example")
+        mid = message_id or f"<msg-{self._inv_n}@{sender.split('@')[-1]}>"
+        payload = {
+            "message_id": mid,
+            "channel": channel,
+            "vendor_id": vendor_id if channel == "portal" else None,
+            "claimed_supplier_name": claimed_name or (sup.legal_name if sup else "Unknown Vendor"),
+            "from_address": sender,
+            "reply_to": None,
+            "to": "ap-invoices@tbeu.example",
+            "subject": subject,
+            "body": body,
+            "eml_path": None,
+            "in_reply_to": in_reply_to,
+            "thread_id": thread_id or f"thr-{self._inv_n}",
+            "attachments": [],
+            "bank_details": (
+                {
+                    "iban": iban,
+                    "bic": None,
+                    "bank_name": bank_name,
+                    "account_number": None,
+                    "routing_number": None,
+                    "bank_code": None,
+                    "branch_code": None,
+                    "holder": claimed_name or (sup.legal_name if sup else None),
+                }
+                if iban
+                else None
+            ),
+        }
+        source = channel if channel in ("email", "portal") else "judge"
+        return self._append(
+            make_event(
+                "vendor_message", payload, event_time=when or self.now, source=source, actor=sender
+            )
+        )
+
+    def replies(self) -> list[Event]:
+        return self.store.query(type="colleague_reply", limit=100000)
+
+    def accounts(self, vendor_id: str) -> list[Any]:
+        return self.vendors.accounts(vendor_id=vendor_id)
+
     def close(self) -> None:
         self.ledger.close()
         self.vendors.close()
         self.pay_state.close()
+        self.vendor_state.close()
+        self.ground_truth.close()
         self.bank.close()
         self.provisioner.close()
         self.packets.close()

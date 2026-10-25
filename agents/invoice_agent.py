@@ -573,6 +573,33 @@ class InvoiceAgent:
                         "normalized_name": normalize_name(v.supplier_name),
                     },
                 )
+                ctx.emit(
+                    "vendor_message",
+                    {
+                        "message_id": f"inv-onboard-{invoice_id}",
+                        "channel": "invoice",
+                        "vendor_id": None,
+                        "claimed_supplier_name": v.supplier_name,
+                        "from_address": str(facts.get("sender") or "invoices@unknown.example"),
+                        "reply_to": None,
+                        "to": "ap-invoices@tbeu.example",
+                        "subject": f"Unknown vendor on invoice {v.invoice_number}",
+                        "body": (
+                            f"Invoice {v.invoice_number} from {v.supplier_name} for {v.gross_minor} {v.currency} "
+                            f"(minor units). VAT ID {v.supplier_vat_id or 'none'}. "
+                            f"IBAN {(v.bank_details.iban if v.bank_details else None) or 'none'}. New supplier: onboarding needed."
+                        ),
+                        "eml_path": None,
+                        "in_reply_to": None,
+                        "thread_id": invoice_id,
+                        "attachments": [],
+                        "bank_details": v.bank_details.model_dump() | {"holder": v.supplier_name}
+                        if v.bank_details
+                        else None,
+                    },
+                    source="invoice_agent",
+                    actor="invoice_agent",
+                )
                 ctx.act(
                     action_type="onboarding_opened",
                     rule_id="R5",

@@ -16,18 +16,54 @@ from core.bootstrap import LEGACY_INVOICES, OPENING_BANK_MINOR
 from core.events import EventStore
 from core.ledger import Evidence, JournalEntryDraft, JournalLineDraft
 from core.policy import PostAction
+from core.vendors import Vendor, VendorBankAccount, account_hash
 from scripts.run_world import RunResult, run_world
-from signer.provisioning import DEMO_VENDORS
 from tests.truth_llm import TruthLLM
 
 WORLD = Path(__file__).resolve().parents[2] / "sim" / "world"
-INJECTED_VENDOR = "V-0023"  # not among the 14 provisioned accounts
+INJECTED_VENDOR = "V-9901"  # created after provisioning: its account is not on the chip
+INJECTED_IBAN = "DE02120300000000202051"
 INJECTED_INV = "TEST-NOT-ALLOWLISTED"
 BUTTON_LOG: list[dict[str, object]] = []
 
 
 def _inject_payable(rt: Runtime) -> None:
-    assert INJECTED_VENDOR not in DEMO_VENDORS
+    now = rt.clock.sim_now
+    rt.vendors.upsert_vendor(
+        Vendor(
+            id=INJECTED_VENDOR,
+            legal_name="Testwerk GmbH",
+            vat_id="DE999999999",
+            country="DE",
+            currency="EUR",
+            terms="net30",
+            contact_person="lukas.brandt",
+            status="active",
+            merged_into=None,
+        )
+    )
+    rt.vendors.insert_account(
+        VendorBankAccount(
+            id=rt.vendors.next_account_id(),
+            vendor_id=INJECTED_VENDOR,
+            iban_or_acct=INJECTED_IBAN,
+            account_hash=account_hash(INJECTED_IBAN),
+            status="active",
+            requested_at=now,
+            requested_via="onboarding",
+            requested_by="test",
+            request_event_id=None,
+            verified_via="contract",
+            verified_event_id=None,
+            verified_at=now,
+            hold_until=now,
+            approved_by="controller",
+            approval_event_id=None,
+            approved_at=now,
+            on_chip=False,
+            retired_at=None,
+        )
+    )
     decision = rt.store.query(type="controller_decision", limit=1)[0]
     draft = JournalEntryDraft(
         effective_date=date(2026, 9, 30),

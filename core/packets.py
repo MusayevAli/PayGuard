@@ -10,7 +10,7 @@ import threading
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
@@ -279,3 +279,64 @@ class PacketStore:
 
     def open_packets(self) -> list[Packet]:
         return self.packets(status="open")
+
+
+def format_minor(minor: int | None, currency: str | None) -> str:
+    if minor is None or currency is None:
+        return ""
+    if currency == "JPY":
+        return f"{minor:,} JPY"
+    sign = "-" if minor < 0 else ""
+    return f"{sign}{abs(minor) // 100:,}.{abs(minor) % 100:02d} {currency}"
+
+
+def render(packet: Packet) -> dict[str, Any]:
+    """The packet as the controller phone shows it (spec §16.4): question, context, evidence rows,
+    materiality, recommendation with its reason, options with outcome labels, what happens if
+    nobody answers, and the decision once taken."""
+    options = [
+        {"id": o.id, "label": o.label, "recommended": o.id == packet.recommendation}
+        for o in packet.options
+    ]
+    recommended = next((o for o in packet.options if o.id == packet.recommendation), None)
+    return {
+        "id": packet.id,
+        "status": packet.status,
+        "kind": packet.kind,
+        "severity": packet.severity,
+        "agent": packet.agent,
+        "created_at": _iso(packet.created_at),
+        "question": packet.question,
+        "context": packet.context,
+        "evidence_rows": [
+            {"role": e.role, "summary": e.summary, "event_id": e.event_id} for e in packet.evidence
+        ],
+        "materiality": {
+            "minor": packet.materiality_minor,
+            "currency": packet.currency,
+            "formatted": format_minor(packet.materiality_minor, packet.currency),
+        },
+        "recommendation": {
+            "id": packet.recommendation,
+            "label": recommended.label if recommended else packet.recommendation,
+            "reason": packet.recommendation_reason,
+        },
+        "options": options,
+        "if_no_answer": packet.consequence_of_silence,
+        "expires_at": _iso(packet.expires_at) if packet.expires_at else None,
+        "auto_action_on_expiry": packet.auto_action_on_expiry,
+        "refs": list(packet.refs),
+        "decision": None
+        if packet.decision is None
+        else {
+            "decision": packet.decision.decision,
+            "label": next(
+                (o.label for o in packet.options if o.id == packet.decision.decision),
+                packet.decision.decision,
+            ),
+            "note": packet.decision.note,
+            "decided_by": packet.decision.decided_by,
+            "decided_at": _iso(packet.decision.decided_at),
+            "via": packet.decision.via,
+        },
+    }

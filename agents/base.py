@@ -121,6 +121,18 @@ class Context:
         ).event
         return ActResult(event=ev, result=result, duplicate=duplicate)
 
+    def with_principal(self, principal: str) -> Context:
+        """The same session acting as another principal (a controller decision the agent carries
+        out); every action is still logged, under that principal."""
+        return Context(
+            principal=principal,
+            policy=self._policy,
+            store=self._store,
+            now=self._now,
+            explainer=self._explainer,
+            messenger=self._messenger,
+        )
+
     def emit(
         self,
         type_: str,

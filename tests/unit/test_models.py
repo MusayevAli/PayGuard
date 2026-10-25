@@ -51,6 +51,7 @@ def test_every_spec_event_type_has_a_payload_model() -> None:
         "judge_injection",
         "system_error",
         "score_update",
+        "timer",
     }
     assert set(EVENT_TYPES) == expected
     assert set(PAYLOAD_MODELS) == expected

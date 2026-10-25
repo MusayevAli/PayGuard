@@ -71,6 +71,7 @@ def test_day_index_epoch_and_clamp() -> None:
         ),
         ProvisionFrame(slot=0, account_hash=HASH, account_cap=250_000_000, hold_until_day=273),
         ProvisionFrame(slot=15, account_hash=HASH, account_cap=0, hold_until_day=0xFFFF),
+        ProvisionFrame(slot=63, account_hash=HASH, account_cap=0, hold_until_day=0xFFFF),
         ProvisionFrame(slot=SLOT_DAILY_CAP, daily_cap=300_000_000),
         ProvisionFrame(slot=SLOT_BUTTON_THRESHOLD, button_threshold=5_000_000),
         ProvisionFrame(slot=SLOT_NONCE_TIMEOUT, nonce_timeout_days=2),
@@ -138,7 +139,7 @@ def test_malformed_provision_slot() -> None:
     raw = bytearray(
         encode(ProvisionFrame(slot=0, account_hash=HASH, account_cap=1, hold_until_day=0))
     )
-    raw[1] = 0x10
+    raw[1] = 0x40  # the 65th slot does not exist
     with pytest.raises(FrameError) as exc:
         decode(_recrc(bytes(raw[:62])))
     assert exc.value.reason == "malformed"
@@ -158,7 +159,7 @@ def test_encode_rejects_out_of_range_fields() -> None:
     with pytest.raises(ValueError):
         encode(PayFrame(seq=1, account_hash=HASH, amount_minor=1, currency="EUR", pay_id="payé"))
     with pytest.raises(ValueError):
-        encode(ProvisionFrame(slot=16, account_hash=HASH, account_cap=1, hold_until_day=0))
+        encode(ProvisionFrame(slot=64, account_hash=HASH, account_cap=1, hold_until_day=0))
     with pytest.raises(ValueError):
         encode(ProvisionFrame(slot=SLOT_KEY, key=b"short"))
 

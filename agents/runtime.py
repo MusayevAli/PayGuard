@@ -19,6 +19,8 @@ from agents.payment_agent import PaymentAgent
 from agents.payment_state import PaymentState
 from agents.runner import Runner
 from agents.state import AgentState
+from agents.vendor_agent import VendorAgent
+from agents.vendor_state import VendorState
 from bank.mock_bank import MockBank
 from core.bootstrap import BootstrapResult, bootstrap
 from core.events import EventStore
@@ -28,12 +30,13 @@ from core.policy import Policy
 from core.score import Scoreboard, scoreboard_from_world
 from core.vendors import VendorMaster
 from signer.interface import Signer
-from signer.provisioning import DEMO_VENDORS, Provisioner, chip_key
+from signer.provisioning import Provisioner, chip_key
 from signer.stub import StubSigner
 from sim.clock import SimClock
 from sim.fx import FxTable, load_fx_rates
 from sim.models import Event, Person, Supplier
-from sim.people import Responders
+from sim.people import AutoController, People
+from sim.people import GroundTruth as PeopleTruth
 
 log = structlog.get_logger("runtime")
 
@@ -62,6 +65,8 @@ class Runtime:
     policy: Policy
     invoice_state: AgentState
     payment_state: PaymentState
+    vendor_state: VendorState
+    people_truth: PeopleTruth
     llm: Any
     signer: Signer
     bank: MockBank
@@ -69,11 +74,13 @@ class Runtime:
     jumper: JumperFlag
     invoice_agent: InvoiceAgent | None
     payment_agent: PaymentAgent | None
+    vendor_agent: VendorAgent | None
+    auto_controller: AutoController | None
     runner: Runner
     scoreboard: Scoreboard | None
     suppliers: list[Supplier]
     people: list[Person]
-    responders: Responders
+    responders: People
     owns_llm: bool
 
     def close(self) -> None:
@@ -83,6 +90,8 @@ class Runtime:
             self.packets.close,
             self.invoice_state.close,
             self.payment_state.close,
+            self.vendor_state.close,
+            self.people_truth.close,
             self.bank.close,
             self.provisioner.close,
         ):
@@ -105,8 +114,9 @@ def build_runtime(
     world_events: Sequence[Event],
     llm: Any | None = None,
     signer: Signer | None = None,
-    agents: Sequence[str] = ("invoice", "payment"),
+    agents: Sequence[str] = ("invoice", "payment", "vendor"),
     score: bool = True,
+    auto_controller: bool = False,
     cache_db: Path | None = None,
     beancount_path: Path | None = None,
 ) -> Runtime:
@@ -131,6 +141,8 @@ def build_runtime(
     policy = Policy(ledger=ledger, vendors=vendors, events=store, jumper_present=jumper, now=now)
     invoice_state = AgentState(db_path)
     payment_state = PaymentState(db_path)
+    vendor_state = VendorState(db_path)
+    people_truth = PeopleTruth(db_path)
     suppliers = [
         Supplier.model_validate(s)
         for s in json.loads((world_dir / "suppliers.json").read_text(encoding="utf-8"))
@@ -156,11 +168,14 @@ def build_runtime(
         jumper_present=jumper,
         key=key,
     )
-    responders = Responders(
+    responders = People(
         people,
         events_source=lambda: list(world_events) + clock.pending_events(),
         clock=clock,
         store=store,
+        suppliers=suppliers,
+        truth_store=people_truth,
+        llm=client,
     )
     scoreboard = (
         scoreboard_from_world(
@@ -201,7 +216,28 @@ def build_runtime(
         if "payment" in agents
         else None
     )
-    active = [a for a in (invoice_agent, payment_agent) if a is not None]
+    vendor_agent = (
+        VendorAgent(
+            store=store,
+            ledger=ledger,
+            vendors=vendors,
+            packets=packets,
+            state=vendor_state,
+            people=responders,
+            suppliers=suppliers,
+            payment_state=payment_state,
+            invoice_state=invoice_state,
+            schedule=clock.schedule,
+            now=now,
+            provisioner=provisioner,
+        )
+        if "vendor" in agents
+        else None
+    )
+    controller = AutoController(packets) if auto_controller else None
+    active: list[Any] = [
+        a for a in (invoice_agent, vendor_agent, payment_agent, controller) if a is not None
+    ]
     runner = Runner(
         store=store,
         policy=policy,
@@ -225,6 +261,8 @@ def build_runtime(
         policy=policy,
         invoice_state=invoice_state,
         payment_state=payment_state,
+        vendor_state=vendor_state,
+        people_truth=people_truth,
         llm=client,
         signer=chip,
         bank=bank,
@@ -232,6 +270,8 @@ def build_runtime(
         jumper=jumper,
         invoice_agent=invoice_agent,
         payment_agent=payment_agent,
+        vendor_agent=vendor_agent,
+        auto_controller=controller,
         runner=runner,
         scoreboard=scoreboard,
         suppliers=suppliers,
@@ -241,20 +281,16 @@ def build_runtime(
     )
 
 
-def start_runtime(
-    rt: Runtime, *, provision: Sequence[str] | None = DEMO_VENDORS
-) -> BootstrapResult:
-    """Opening balances and vendor master (idempotent), then the pre-demo provisioning with the
-    jumper present, after which the jumper is pulled."""
+def start_runtime(rt: Runtime, *, provision: bool = True) -> BootstrapResult:
+    """Opening balances and vendor master (idempotent), then the pre-demo provisioning of every
+    active approved account with the jumper present, after which the jumper is pulled."""
     result = bootstrap(rt.ledger, rt.store, rt.vendors, suppliers=rt.suppliers)
     if rt.payment_agent is not None and provision:
         rt.jumper.present = True
         try:
-            status = rt.signer.status()
-            if not status.key_loaded:
+            if not rt.signer.status().key_loaded:
                 rt.provisioner.load_key_and_caps()
-            for vendor_id in provision:
-                rt.provisioner.enqueue(vendor_id)
+            rt.provisioner.provision_all()
         finally:
             rt.jumper.present = False
     log.info(

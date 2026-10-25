@@ -132,6 +132,8 @@ def checks_for(
                 "where": {"refs_contains": "KT-2270"},
                 "ok": False,
                 "reasons_contains": ["not_allowlisted", "in_hold"],
+                "chip_reason": "not_allowlisted",
+                "annotations_contains": ["in_hold"],
             },
             _exists("agent_action", action_type="account_suspended", refs_contains="V-0001"),
             _exists("agent_action", action_type="account_restored", refs_contains="V-0001"),

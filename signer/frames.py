@@ -30,7 +30,7 @@ CURRENCY_CODES: Final[dict[str, int]] = {
 }
 CODE_TO_CURRENCY: Final[dict[int, str]] = {v: k for k, v in CURRENCY_CODES.items()}
 
-MAX_SLOTS: Final[int] = 16
+MAX_SLOTS: Final[int] = 64
 SLOT_NONCE_TIMEOUT: Final[int] = 0xFC
 SLOT_BUTTON_THRESHOLD: Final[int] = 0xFD
 SLOT_DAILY_CAP: Final[int] = 0xFE

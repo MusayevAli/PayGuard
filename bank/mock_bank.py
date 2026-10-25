@@ -7,6 +7,7 @@ next day's MT940. Incoming statements (the world's and the bank's own) are parse
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 import threading
 from collections.abc import Callable
@@ -20,6 +21,7 @@ from pydantic import BaseModel, ConfigDict
 from core.bootstrap import OPENING_BANK_MINOR
 from core.events import EventStore, make_event
 from core.money import FxRateUnavailable, Money, convert
+from core.rules import OVERDRAFT_LIMIT_MINOR
 from signer.frames import FrameError, PayFrame, decode, verify_tag
 from sim.fx import FxTable
 from sim.models import Event
@@ -77,7 +79,9 @@ class MockBank:
         out_dir: Path,
         accounts: dict[str, str] | None = None,
         opening: dict[str, int] | None = None,
+        overdraft: dict[str, int] | None = None,
     ) -> None:
+        self._overdraft = dict(OVERDRAFT_LIMIT_MINOR) if overdraft is None else dict(overdraft)
         self._store = store
         self._key = key
         self._fx = fx
@@ -125,6 +129,9 @@ class MockBank:
         if row is None:
             raise KeyError(f"no bank account in {currency}")
         return int(row["world_balance_minor"]) + int(row["runtime_delta_minor"])
+
+    def overdraft(self, currency: str) -> int:
+        return self._overdraft.get(currency, 0)
 
     def balances(self) -> dict[str, int]:
         return {ccy: self.balance(ccy) for ccy in SETTLEMENT_CURRENCIES}
@@ -231,6 +238,26 @@ class MockBank:
         native_minor = int(req["amount_minor"])
         currency = str(req["currency"])
         value_date = self._now().date()
+        mismatch = self._native_mismatch(pay.amount_minor, native_minor, currency, req)
+        if mismatch is not None:
+            self._store.append(
+                make_event(
+                    "system_error",
+                    {
+                        "component": "bank",
+                        "code": "amount_mismatch",
+                        "message": mismatch,
+                        "refs": [pay.pay_id],
+                        "recoverable": True,
+                    },
+                    event_time=self._now(),
+                    source="bank",
+                    actor="bank",
+                )
+            )
+            return self._reject(
+                pay.pay_id, "amount_mismatch", mismatch, native_minor, currency, prefix
+            )
         if currency in self._ibans:
             settle_ccy, settle_minor, rate = currency, native_minor, None
         else:
@@ -241,11 +268,11 @@ class MockBank:
                     pay.pay_id, "fx_unavailable", str(exc), native_minor, currency, prefix
                 )
             settle_ccy, settle_minor, rate = "EUR", conv.money.minor, str(conv.rate)
-        if self.balance(settle_ccy) < settle_minor:
+        if self.balance(settle_ccy) + self._overdraft.get(settle_ccy, 0) < settle_minor:
             return self._reject(
                 pay.pay_id,
                 "insufficient_funds",
-                f"{settle_ccy} balance {self.balance(settle_ccy)} < {settle_minor}",
+                f"{settle_ccy} balance {self.balance(settle_ccy)} plus overdraft {self._overdraft.get(settle_ccy, 0)} < {settle_minor}",
                 native_minor,
                 currency,
                 prefix,
@@ -308,6 +335,33 @@ class MockBank:
             value_date=value_date,
             event_id=None,
         )
+
+    def _native_mismatch(
+        self, eur_minor: int, native_minor: int, currency: str, req: dict[str, Any]
+    ) -> str | None:
+        """The frame carries EUR cents; the request logs the native amount and the rate used. Recompute
+        the native amount from the frame at that rate and refuse when they disagree by more than one
+        EUR cent expressed in native units (half a cent each way of rounding)."""
+        if currency == "EUR":
+            return (
+                None
+                if eur_minor == native_minor
+                else f"frame EUR {eur_minor} != requested {native_minor}"
+            )
+        rate_text = req.get("rate_date")
+        if not rate_text:
+            return "payment_requested carries no rate_date for a non-EUR amount"
+        try:
+            conv = convert(
+                Money(eur_minor, "EUR"), currency, date.fromisoformat(str(rate_text)), self._fx
+            )
+        except (FxRateUnavailable, ValueError) as exc:
+            return f"cannot recompute the native amount: {exc}"
+        recomputed = conv.money.minor
+        tolerance = max(1, math.ceil(float(conv.rate) / 2))  # one EUR cent, in native units
+        if abs(recomputed - native_minor) > tolerance:
+            return f"frame EUR {eur_minor} is {recomputed} {currency} at {rate_text}, request says {native_minor} (tolerance {tolerance})"
+        return None
 
     def credit(self, currency: str, amount_minor: int, *, reference: str, remittance: str) -> str:
         """An incoming transfer the desk arranged (an intercompany draw): credited now, reported on

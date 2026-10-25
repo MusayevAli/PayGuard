@@ -48,6 +48,7 @@ def test_vectors_cover_the_contract() -> None:
         "key_without_jumper",
         "malformed_short",
         "bad_crc",
+        "pay_slot63",
     ):
         assert required in ids
     for c in cases:
