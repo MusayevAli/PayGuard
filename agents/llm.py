@@ -697,6 +697,63 @@ class LLMClient:
         self._store(key, None, "explain", self.text_model, result)
         return result
 
+    def persona_reply(self, person: dict[str, Any], context: dict[str, Any]) -> str | None:
+        """Word a colleague's reply in their voice. Only the wording is the model's: the facts
+        (``context["facts"]``) and the template to paraphrase are given. Without credentials, or
+        when the model drops a required fact, returns None so the caller keeps the template."""
+        if not self.credentials_available():
+            return None
+        facts = context.get("facts") or {}
+        template = str(context.get("template") or "")
+        key = (
+            "persona:"
+            + hashlib.sha256(
+                canonical_json(
+                    {
+                        "person": person.get("id"),
+                        "channel": context.get("channel"),
+                        "template": template,
+                        "facts": facts,
+                    }
+                ).encode("utf-8")
+            ).hexdigest()
+        )
+        cached = self._cached(key)
+        if cached is not None:
+            return str(cached) if cached else None
+        system = (
+            f"You are {person.get('name')}, {person.get('role')} at the company. Persona: {person.get('persona')}. "
+            f"Style: {(person.get('script') or {}).get('reply_style') or 'plain'}. Rewrite the given reply in your own "
+            "voice for the named channel. Keep every fact, identifier, amount and the verdict exactly; add nothing. "
+            "Under 70 words. Return only the message."
+        )
+        user = json.dumps(
+            {
+                "channel": context.get("channel"),
+                "question": context.get("message"),
+                "reply_to_rephrase": template,
+                "facts": facts,
+            },
+            ensure_ascii=False,
+        )
+        text = self._text_call("persona_reply", system, user, max_tokens=250)
+        ok = (
+            text is not None
+            and str(facts.get("verdict", "")).lower()[:6] in text.lower().replace("’", "'")
+            if text
+            else False
+        )
+        if facts.get("verdict") == "confirmed" and text and "confirm" not in text.lower():
+            ok = False
+        if (
+            facts.get("verdict") == "denied"
+            and text
+            and not any(w in text.lower() for w in ("no", "not", "never", "do not"))
+        ):
+            ok = False
+        self._store(key, None, "persona_reply", self.text_model, text if ok else "")
+        return text if ok and text else None
+
     def draft_message(self, kind: str, facts: dict[str, Any]) -> str:
         """Templated skeleton; the model only adjusts tone. Every amount and id must come from facts."""
         skeleton = template_message(kind, facts)

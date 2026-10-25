@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import threading
@@ -9,17 +10,19 @@ from collections.abc import Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import structlog
 from fastapi import FastAPI, Query, Request, WebSocket
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from api.schemas import SpeedIn
 from api.ws import LiveHub, live_endpoint
-from core.events import EventStore
+from core.events import EventStore, make_event
+from core.packets import render
 from sim.clock import DEFAULT_SPEED, SimClock
 from sim.models import Event
 
@@ -96,7 +99,6 @@ def create_app(
     hub = LiveHub(store)
     idem = IdempotencyCache()
     from agents.runtime import Runtime, build_runtime, start_runtime
-    from signer.provisioning import DEMO_VENDORS
 
     runtime: Runtime | None = None
     if desk:
@@ -110,7 +112,7 @@ def create_app(
             world_events=world_events,
             llm=llm,
         )
-        start_runtime(runtime, provision=DEMO_VENDORS if provision else None)
+        start_runtime(runtime, provision=provision)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -324,7 +326,210 @@ def create_app(
     async def bank_accounts() -> dict[str, Any]:
         return {"accounts": desk_rt.bank.accounts()}
 
+    @app.get("/packets")
+    async def list_packets(status: str | None = Query(default=None)) -> dict[str, Any]:
+        if status is not None and status not in ("open", "decided", "expired"):
+            raise ApiError(
+                400,
+                "validation_error",
+                f"unknown packet status {status!r}",
+                "use open, decided or expired",
+            )
+        rows = desk_rt.packets.packets(status=status)  # type: ignore[arg-type]
+        rows.sort(key=lambda p: p.created_at, reverse=True)
+        return {"packets": [render(p) for p in rows], "count": len(rows)}
+
+    @app.get("/packets/{packet_id}")
+    async def get_packet(packet_id: str) -> dict[str, Any]:
+        packet = desk_rt.packets.get(packet_id)
+        if packet is None:
+            raise ApiError(404, "not_found", f"no packet {packet_id}", "GET /packets lists the ids")
+        return render(packet)
+
+    @app.post("/packets/{packet_id}/decide")
+    async def decide(packet_id: str, body: DecisionIn, request: Request) -> JSONResponse:
+        packet = desk_rt.packets.get(packet_id)
+        if packet is None:
+            raise ApiError(404, "not_found", f"no packet {packet_id}", "GET /packets lists the ids")
+        option_ids = [o.id for o in packet.options]
+        if body.decision not in option_ids:
+            raise ApiError(
+                400,
+                "validation_error",
+                f"{body.decision!r} is not an option of {packet_id}",
+                "use one of: " + ", ".join(option_ids),
+            )
+
+        def compute() -> tuple[int, Any]:
+            result = desk_rt.packets.decide_packet(
+                packet_id,
+                body.decision,
+                body.note,
+                body.decided_by,
+                via="phone",
+                decided_at=clock.sim_now,
+            )
+            desk_rt.runner.drain()
+            fresh = desk_rt.packets.get(packet_id)
+            return 200, {
+                "decision": result.model_dump(mode="json"),
+                "packet": render(fresh) if fresh else None,
+            }
+
+        status, payload = idem.run(request, compute)
+        return JSONResponse(status_code=status, content=payload)
+
+    @app.get("/vendors/{vendor_id}")
+    async def get_vendor(vendor_id: str) -> dict[str, Any]:
+        vendor = desk_rt.vendors.get_vendor(vendor_id)
+        if vendor is None:
+            raise ApiError(
+                404, "not_found", f"no vendor {vendor_id}", "vendor ids look like V-0001"
+            )
+        accounts = desk_rt.vendors.accounts(vendor_id=vendor_id)
+        return {
+            "vendor": vendor.model_dump(mode="json"),
+            "accounts": [_account_view(a) for a in accounts if a.status != "retired"],
+            "active_account": next(
+                (_account_view(a) for a in accounts if a.status == "active"), None
+            ),
+        }
+
+    @app.get("/vendors/{vendor_id}/accounts/history")
+    async def account_history(vendor_id: str) -> dict[str, Any]:
+        if desk_rt.vendors.get_vendor(vendor_id) is None:
+            raise ApiError(
+                404, "not_found", f"no vendor {vendor_id}", "vendor ids look like V-0001"
+            )
+        rows = sorted(desk_rt.vendors.accounts(vendor_id=vendor_id), key=lambda a: a.requested_at)
+        return {"vendor_id": vendor_id, "accounts": [_account_view(a) for a in rows]}
+
+    @app.post("/judge/message")
+    async def judge_message(form: MessageForm, request: Request) -> JSONResponse:
+        supplier = None
+        if form.supplier_id:
+            supplier = next((s for s in desk_rt.suppliers if s.id == form.supplier_id), None)
+            if supplier is None:
+                raise ApiError(
+                    400,
+                    "validation_error",
+                    f"unknown supplier {form.supplier_id}",
+                    "use a supplier id from the world or give supplier_name",
+                )
+        name = form.supplier_name or (supplier.legal_name if supplier else None)
+        if not name:
+            raise ApiError(
+                400,
+                "validation_error",
+                "supplier_id or supplier_name is required",
+                "name the supplier the message claims to come from",
+            )
+
+        def compute() -> tuple[int, Any]:
+            now = clock.sim_now
+            thread = f"thr_judge_{hashlib.sha256((form.from_address + form.body).encode()).hexdigest()[:8]}"
+            payload = {
+                "message_id": f"<judge-{now:%Y%m%d%H%M%S}-{thread[-8:]}@{form.from_address.split('@')[-1]}>",
+                "channel": form.channel,
+                "vendor_id": supplier.id if (supplier and form.channel == "portal") else None,
+                "claimed_supplier_name": name,
+                "from_address": form.from_address,
+                "reply_to": None,
+                "to": "ap-invoices@tbeu.example",
+                "subject": form.subject or f"Message from {name}",
+                "body": form.body,
+                "eml_path": None,
+                "in_reply_to": None,
+                "thread_id": thread,
+                "attachments": [],
+                "bank_details": {
+                    "iban": form.iban,
+                    "bic": None,
+                    "bank_name": form.bank_name,
+                    "account_number": None,
+                    "routing_number": None,
+                    "bank_code": None,
+                    "branch_code": None,
+                    "holder": name,
+                }
+                if form.iban
+                else None,
+            }
+            message = store.append(
+                make_event(
+                    "vendor_message",
+                    payload,
+                    event_time=now,
+                    source="judge",
+                    actor=form.from_address,
+                )
+            ).event
+            injection = store.append(
+                make_event(
+                    "judge_injection",
+                    {
+                        "kind": "message",
+                        "submitted_by": form.submitted_by,
+                        "form": form.model_dump(mode="json"),
+                        "resulting_event_id": message.id,
+                    },
+                    event_time=now,
+                    source="judge",
+                    actor=form.submitted_by or "judge",
+                )
+            ).event
+            desk_rt.runner.drain()
+            return 200, {
+                "vendor_message_id": message.id,
+                "judge_injection_id": injection.id,
+                "thread_id": thread,
+            }
+
+        status, payload = idem.run(request, compute)
+        return JSONResponse(status_code=status, content=payload)
+
     return app
+
+
+def _account_view(a: Any) -> dict[str, Any]:
+    compact = a.iban_or_acct.replace(" ", "")
+    masked = f"{compact[:4]} **** {compact[-4:]}" if len(compact) > 8 else "****"
+    return {
+        "id": a.id,
+        "iban_masked": masked,
+        "account_hash_prefix": a.account_hash[:12],
+        "status": a.status,
+        "requested_at": _iso(a.requested_at),
+        "requested_via": a.requested_via,
+        "requested_by": a.requested_by,
+        "verified_via": a.verified_via,
+        "verified_at": _iso(a.verified_at),
+        "hold_until": _iso(a.hold_until),
+        "approved_by": a.approved_by,
+        "approved_at": _iso(a.approved_at),
+        "on_chip": a.on_chip,
+        "retired_at": _iso(a.retired_at),
+    }
+
+
+class DecisionIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    decision: str = Field(min_length=1, max_length=64)
+    note: str | None = Field(default=None, max_length=2000)
+    decided_by: str = Field(min_length=1, max_length=64)
+
+
+class MessageForm(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    supplier_id: str | None = None
+    supplier_name: str | None = Field(default=None, max_length=200)
+    channel: Literal["email", "portal", "phone"]
+    from_address: str = Field(min_length=3, max_length=200)
+    subject: str | None = Field(default=None, max_length=300)
+    body: str = Field(min_length=1, max_length=20000)
+    iban: str | None = Field(default=None, max_length=40)
+    bank_name: str | None = Field(default=None, max_length=120)
+    submitted_by: str | None = Field(default=None, max_length=120)
 
 
 def _app_from_env() -> FastAPI:

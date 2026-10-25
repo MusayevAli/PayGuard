@@ -33,6 +33,7 @@ from core.rules import (
     BUTTON_THRESHOLD_MINOR,
     DISCOUNT_LEAD_DAYS,
     INTERCOMPANY_RATE_BP,
+    OVERDRAFT_LIMIT_MINOR,
     PAY_LEAD_DAYS,
     RECON_GRACE_DAYS,
     ROUNDING_TOL_MINOR,
@@ -115,7 +116,9 @@ class PaymentAgent:
         fx: FxTable,
         now: Callable[[], datetime],
         provisioner: Provisioner | None = None,
+        overdraft: dict[str, int] | None = None,
     ) -> None:
+        self._overdraft = dict(OVERDRAFT_LIMIT_MINOR) if overdraft is None else dict(overdraft)
         self.store = store
         self.ledger = ledger
         self.vendors = vendors
@@ -202,7 +205,11 @@ class PaymentAgent:
                     {"vendor_id": g.vendor_id, "status": "awaiting_decision"}
                 )
                 continue
-            if cash[settle_ccy] - settle_minor < 0:
+            short_of_cash = cash[settle_ccy] - settle_minor < 0
+            short_of_overdraft = (
+                cash[settle_ccy] + self._overdraft.get(settle_ccy, 0) - settle_minor < 0
+            )
+            if (g.discount > 0 and short_of_cash) or (g.discount == 0 and short_of_overdraft):
                 if g.discount > 0:
                     pkt_id = self._t9_packet(
                         g, today, cash[settle_ccy], settle_minor, settle_ccy, ctx
@@ -211,7 +218,7 @@ class PaymentAgent:
                         {
                             "vendor_id": g.vendor_id,
                             "packet_id": pkt_id,
-                            "shortfall_minor": settle_minor - cash[settle_ccy],
+                            "shortfall_minor": settle_minor - max(0, cash[settle_ccy]),
                             "currency": settle_ccy,
                         }
                     )
@@ -317,7 +324,7 @@ class PaymentAgent:
         the policy refused the request (payables held)."""
         inv_ids = [p.inv_id for p in g.payables]
         numbers = [n for n in (self._invoice_number(p.inv_id) for p in g.payables) if n]
-        acct = self.vendors.active_account(g.vendor_id)
+        acct = self._target_account(g.vendor_id)
         if acct is None:
             self._hold_payables(
                 g, "no_active_account", ctx, refs=[g.vendor_id, *inv_ids, *numbers], rule_id=None
@@ -443,9 +450,13 @@ class PaymentAgent:
             seq=self.signer.status().seq + 1,
         )
         res = self.signer.sign(frame)
-        reasons: list[str] = [] if res.ok else [res.reason or "unknown"]
-        if not res.ok and acct.hold_until > ctx.now and "in_hold" not in reasons:
-            reasons.append("in_hold")
+        chip_reason = None if res.ok else (res.reason or "unknown")
+        annotations: list[str] = []
+        if not res.ok and acct.hold_until > ctx.now:
+            annotations.append("in_hold")
+        reasons: list[str] = ([chip_reason] if chip_reason else []) + [
+            a for a in annotations if a != chip_reason
+        ]
         chip = ctx.emit(
             "chip_response",
             {
@@ -453,6 +464,8 @@ class PaymentAgent:
                 "ok": res.ok,
                 "tag_hex": res.tag.hex() if res.tag else None,
                 "reasons": reasons,
+                "chip_reason": chip_reason,
+                "desk_annotations": annotations,
                 "latency_ms": res.latency_ms,
                 "raw_hex": res.raw.hex(),
                 "signer": self.signer.kind,
@@ -587,6 +600,14 @@ class PaymentAgent:
             executed_event_id=executed.id,
             entry_id=entry.id,
         )
+
+    def _target_account(self, vendor_id: str) -> VendorBankAccount | None:
+        """The account to pay: a change the controller approved is honoured at once (the chip and the
+        desk annotation enforce its hold); otherwise the active account on file."""
+        for acct in self.vendors.accounts(vendor_id=vendor_id, status="pending"):
+            if acct.approved_by is not None and acct.verified_via is not None:
+                return acct
+        return self.vendors.active_account(vendor_id)
 
     def _chip_rejected(
         self,
@@ -778,11 +799,13 @@ class PaymentAgent:
     def _t9_packet(
         self, g: Group, today: date, cash: int, settle_minor: int, settle_ccy: str, ctx: Context
     ) -> str:
-        shortfall = settle_minor - cash
+        # the part of this payment that positive cash cannot fund; an account already overdrawn
+        # for due payments does not make the discount question any larger than the payment
+        available = max(0, cash)
+        shortfall = settle_minor - available
         discount_eur = self._settlement(g.discount, g.currency, today)[2]
         deadline = min(p.discount_deadline for p in g.discounted if p.discount_deadline)
         due = min(p.due_date for p in g.payables)
-        available = max(0, cash)
         covered_share = available / settle_minor if settle_minor else 0
         captured = int(g.discount * covered_share)
         lost_partial = self._settlement(g.discount - captured, g.currency, today)[2]
@@ -815,7 +838,7 @@ class PaymentAgent:
         packet = self.packets.create_packet(
             PacketDraft(
                 agent=self.principal,
-                question=f"Discount of EUR {_fmt(discount_eur, 'EUR')} on {', '.join(numbers or [p.inv_id for p in g.payables])} expires {deadline.isoformat()}; {settle_ccy} cash {_fmt(cash, settle_ccy)} is short by {_fmt(shortfall, settle_ccy)} for the {_fmt(settle_minor, settle_ccy)} payment. Which option?",
+                question=f"Discount of EUR {_fmt(discount_eur, 'EUR')} on {', '.join(numbers or [p.inv_id for p in g.payables])} expires {deadline.isoformat()}; {settle_ccy} cash {_fmt(cash, settle_ccy)} covers {_fmt(available, settle_ccy)} of the {_fmt(settle_minor, settle_ccy)} payment (short by {_fmt(shortfall, settle_ccy)}). Which option?",
                 context=f"Net benefit in EUR: pay_partial_now {_fmt(benefits['pay_partial_now'], 'EUR')}; draw_intercompany {_fmt(benefits['draw_intercompany'], 'EUR')} (at {INTERCOMPANY_RATE_BP / 100:.2f} % p.a.); skip_discount 0.00. Due date {due.isoformat()}.",
                 severity="action",
                 refs=[g.vendor_id, *[p.inv_id for p in g.payables], *numbers],
@@ -849,7 +872,7 @@ class PaymentAgent:
                 },
             )
         ctx.act(
-            action_type="held",
+            action_type="discount_escalated",
             rule_id=None,
             refs=[packet.id, g.vendor_id, *[p.inv_id for p in g.payables], *numbers],
             inputs={

@@ -291,6 +291,13 @@ class PersonScript(StrictModel):
     denies_incomplete_evidence: bool = False
     confirms_freight_up_to_minor: int | None = None
     reply_style: str | None = None
+    confirms_bank_change_for: list[str] = Field(
+        default_factory=list,
+        description="vendor ids whose bank change this person truly knows about",
+    )
+    successor_id: str | None = Field(
+        default=None, description="who took over this person's portfolio"
+    )
 
 
 class Person(StrictModel):
@@ -330,7 +337,15 @@ ActionType = Literal[
     "payment_run_built",
     "payment_requested",
     "payment_held",
+    "discount_escalated",
     "reconciled",
+    "domain_flagged",
+    "message_classified",
+    "account_approved",
+    "activation_scheduled",
+    "payment_requeued",
+    "vendor_created",
+    "vendor_activated",
     "policy_violation",
     "error",
 ]
@@ -394,7 +409,7 @@ class VendorMessage(StrictModel):
 class ColleagueReply(StrictModel):
     message_id: str
     person_id: str
-    channel: Literal["email", "phone", "chat"]
+    channel: Literal["email", "phone", "chat", "portal"]
     in_reply_to: str | None
     thread_id: str | None
     subject: str | None
@@ -485,6 +500,11 @@ class ChipResponse(StrictModel):
     ok: bool
     tag_hex: str | None
     reasons: list[str]
+    """Union of ``chip_reason`` and ``desk_annotations`` (what the scoreboard and the rail show)."""
+    chip_reason: str | None = None
+    """The one reason byte the chip answered with, or None on success."""
+    desk_annotations: list[str] = Field(default_factory=list)
+    """What the host could see in the vendor master (``in_hold`` while the paying account's hold runs)."""
     latency_ms: int | None
     raw_hex: str | None
     signer: Literal["stub", "hw"]
@@ -533,6 +553,16 @@ class JudgeInjection(StrictModel):
     submitted_by: str | None
     form: dict[str, Any]
     resulting_event_id: str | None
+
+
+class Timer(StrictModel):
+    """An agent's wake-up call scheduled on the clock (an activation at hold_until, a re-check)."""
+
+    agent: str
+    purpose: str
+    refs: list[str]
+    due_at: AwareDatetime
+    key: str
 
 
 class SystemError(StrictModel):
@@ -599,6 +629,7 @@ EventType = Literal[
     "judge_injection",
     "system_error",
     "score_update",
+    "timer",
 ]
 EVENT_TYPES: tuple[str, ...] = get_args(EventType)
 
@@ -618,6 +649,7 @@ PAYLOAD_MODELS: dict[str, type[BaseModel]] = {
     "chip_response": ChipResponse,
     "payment_executed": PaymentExecuted,
     "bank_rejected": BankRejected,
+    "timer": Timer,
     "provisioning": Provisioning,
     "day_boundary": DayBoundary,
     "judge_injection": JudgeInjection,
@@ -734,6 +766,8 @@ class ChipResponseCheck(StrictModel):
     where: dict[str, Any]
     ok: bool
     reasons_contains: list[str] = Field(default_factory=list)
+    chip_reason: str | None = None
+    annotations_contains: list[str] = Field(default_factory=list)
 
 
 class PacketExistsCheck(StrictModel):

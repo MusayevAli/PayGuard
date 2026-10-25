@@ -39,6 +39,7 @@ def roster() -> list[Person]:
                     "anything confirming one. Do not change the account."
                 ),
                 reply_style="short, warm, Czech-accented English",
+                confirms_bank_change_for=["V-0007"],
             ),
         ),
         Person(
@@ -123,7 +124,9 @@ def roster() -> list[Person]:
             active=True,
             left_at=None,
             persona="Buyer for Polish suppliers; took over Jana Svobodová's portfolio in September 2026.",
-            script=PersonScript(reply_style="friendly, thorough"),
+            script=PersonScript(
+                reply_style="friendly, thorough", confirms_bank_change_for=["V-0015"]
+            ),
         ),
         Person(
             id="jana.svobodova",
@@ -136,7 +139,9 @@ def roster() -> list[Person]:
             active=False,
             left_at=date(2026, 8, 31),
             persona="Former buyer for Polish suppliers. Left the company on 31 August 2026; mail bounces.",
-            script=PersonScript(reply_style="bounce: 550 5.1.1 user unknown"),
+            script=PersonScript(
+                reply_style="bounce: 550 5.1.1 user unknown", successor_id="agnieszka.kowalczyk"
+            ),
         ),
     ]
 
@@ -146,22 +151,34 @@ def by_id() -> dict[str, Person]:
 
 
 # ---------------------------------------------------------------------------------------
-# Scripted responders (Part 3). Part 5 adds LLM personas behind the same ``reply`` interface.
+# The people layer (Part 3 scripted responders, Part 5 verification replies and the controller).
+# Facts come from hidden scripts; wording comes from a persona model when a key is configured and
+# from per-person templates otherwise. Either way the event shape is identical.
 # ---------------------------------------------------------------------------------------
 
+import random  # noqa: E402
 import re  # noqa: E402
+import sqlite3  # noqa: E402
+import threading  # noqa: E402
 from collections.abc import Callable, Sequence  # noqa: E402
 from datetime import datetime, timedelta  # noqa: E402
+from pathlib import Path  # noqa: E402
 from typing import Any  # noqa: E402
 
 from pydantic import BaseModel, ConfigDict  # noqa: E402
 
 from core.events import make_event  # noqa: E402
 from sim.clock import SimClock  # noqa: E402
-from sim.models import ColleagueQuery, Event  # noqa: E402
+from sim.models import ColleagueQuery, Event, Supplier  # noqa: E402
 
 DEFAULT_WAREHOUSE_DELAY_HOURS = 4.0
 DEFAULT_BUYER_DELAY_HOURS = 6.0
+REPLY_DELAY_HOURS: dict[str, tuple[float, float]] = {
+    "email": (2.0, 30.0),
+    "phone": (1.0, 3.0),
+    "portal": (6.0, 12.0),
+    "chat": (0.5, 4.0),
+}
 
 
 class ScriptedReply(BaseModel):
@@ -169,6 +186,20 @@ class ScriptedReply(BaseModel):
     body: str
     delay_hours: float
     refs: list[str]
+
+
+class Reply(BaseModel):
+    """A person's answer: the scripted facts (``refs``, ``facts``) and the wording (``body``)."""
+
+    model_config = ConfigDict(extra="forbid")
+    person_id: str
+    channel: str
+    body: str
+    delay_hours: float
+    refs: list[str]
+    bounced: bool = False
+    facts: dict[str, Any] = {}
+    wording: str = "template"
 
 
 class ScriptedPerson:
@@ -289,9 +320,53 @@ class ScriptedPerson:
         )
 
 
-class Responders:
-    """Messenger implementation: routes a query to the scripted person and schedules the
-    ``colleague_reply`` event on the clock."""
+class GroundTruth:
+    """What the agents must never read: which replies came from a compromised mailbox (spec §7.6)."""
+
+    def __init__(self, path: str | Path) -> None:
+        self._lock = threading.RLock()
+        self._con = sqlite3.connect(str(path), check_same_thread=False, isolation_level=None)
+        self._con.row_factory = sqlite3.Row
+        self._con.execute("PRAGMA journal_mode=WAL")
+        self._con.execute(
+            "CREATE TABLE IF NOT EXISTS ground_truth (reply_event_id TEXT PRIMARY KEY, person_id TEXT NOT NULL, mailbox_compromised INTEGER NOT NULL, note TEXT NOT NULL)"
+        )
+
+    def close(self) -> None:
+        with self._lock:
+            self._con.close()
+
+    def record(
+        self, reply_event_id: str, person_id: str, *, mailbox_compromised: bool, note: str
+    ) -> None:
+        with self._lock:
+            self._con.execute(
+                "INSERT OR IGNORE INTO ground_truth(reply_event_id, person_id, mailbox_compromised, note) VALUES (?,?,?,?)",
+                (reply_event_id, person_id, 1 if mailbox_compromised else 0, note),
+            )
+
+    def rows(self) -> list[dict[str, Any]]:
+        with self._lock:
+            return [
+                dict(r)
+                for r in self._con.execute("SELECT * FROM ground_truth ORDER BY rowid").fetchall()
+            ]
+
+
+def _mask(account: str | None) -> str:
+    if not account:
+        return "****"
+    compact = account.replace(" ", "")
+    return f"{compact[:4]} **** {compact[-4:]}" if len(compact) > 8 else "****"
+
+
+def _first_name(person: Person) -> str:
+    return person.name.split()[0]
+
+
+class People:
+    """Routes agent questions to people, decides the scripted facts, words the reply and delivers
+    it as a ``colleague_reply`` through the clock. Also the Part 3 ``Messenger``."""
 
     def __init__(
         self,
@@ -300,37 +375,287 @@ class Responders:
         events_source: Callable[[], Sequence[Event]],
         clock: SimClock,
         store: Any,
+        suppliers: Sequence[Supplier] = (),
+        truth_store: GroundTruth | None = None,
+        llm: Any | None = None,
+        seed: int = 1,
     ) -> None:
-        self._people = {p.id: ScriptedPerson(p, events_source) for p in people}
+        self._people = {p.id: p for p in people}
+        self._scripted = {p.id: ScriptedPerson(p, events_source) for p in people}
+        self._events = events_source
         self._clock = clock
         self._store = store
+        self._suppliers = {s.id: s for s in suppliers}
+        self._truth = truth_store
+        self._llm = llm
+        self._seed = seed
+
+    # ------------------------------------------------------------------ roster
 
     def person(self, person_id: str) -> Person:
-        return self._people[person_id].person
+        return self._people[person_id]
 
-    def ask(self, query: ColleagueQuery, *, asked_event_id: str, sim_time: datetime) -> None:
-        responder = self._people.get(query.to_person)
-        if responder is None:
-            return
-        reply = responder.reply(query, sim_time)
-        if reply is None:
-            return
+    def has(self, person_id: str) -> bool:
+        return person_id in self._people
+
+    def successor(self, person_id: str) -> Person | None:
+        p = self._people.get(person_id)
+        if p is None or p.script.successor_id is None:
+            return None
+        return self._people.get(p.script.successor_id)
+
+    def legit_bank_changes(self) -> set[str]:
+        return {v for p in self._people.values() for v in p.script.confirms_bank_change_for}
+
+    # ------------------------------------------------------------------ Part 5: verification replies
+
+    def reply(
+        self,
+        to_person: str,
+        channel: str,
+        message: str,
+        sim_time: datetime,
+        *,
+        context: dict[str, Any] | None = None,
+    ) -> Reply:
+        """What ``to_person`` answers over ``channel``. Facts follow the hidden script; wording is
+        the persona model's when available, otherwise the person's templates."""
+        person = self._people[to_person]
+        ctx = dict(context or {})
+        thread = str(ctx.get("thread_id") or message[:40])
+        delay = self._delay(person.id, channel, thread)
+        if not person.active:
+            return Reply(
+                person_id=person.id,
+                channel=channel,
+                body=f"Mail delivery failed: {person.email} (550 5.1.1 user unknown)",
+                delay_hours=0.1,
+                refs=["bounced"],
+                bounced=True,
+                facts={"bounced": True},
+            )
+        compromised = (
+            channel == "email"
+            and person.mailbox_compromised_from is not None
+            and sim_time.date() >= person.mailbox_compromised_from
+        )
+        kind = str(ctx.get("kind") or "generic")
+        if kind == "bank_change_verification":
+            vendor_id = str(ctx.get("vendor_id") or "")
+            vendor_name = str(ctx.get("vendor_name") or vendor_id)
+            supplier = self._suppliers.get(vendor_id)
+            on_file = _mask(supplier.iban if supplier else None)
+            phone = supplier.phone if supplier else "the contract number"
+            if compromised:
+                verdict, template = (
+                    "confirmed",
+                    person.script.email_reply_when_compromised
+                    or "Confirmed, they told me last week.",
+                )
+            elif vendor_id in person.script.confirms_bank_change_for:
+                verdict, template = (
+                    "confirmed",
+                    f"Yes, {vendor_name} told us about the new account; it is fine to update it. {_first_name(person)}",
+                )
+            elif person.id == "petra.vlcek" and person.script.phone_reply and vendor_id == "V-0001":
+                verdict, template = "denied", person.script.phone_reply
+            else:
+                verdict, template = (
+                    "denied",
+                    (
+                        f"No. Nobody at {vendor_name} told me about a bank change. The account on file is {on_file}; "
+                        f"if in doubt call them on the contract number {phone}. {_first_name(person)}"
+                    ),
+                )
+            facts = {
+                "verdict": verdict,
+                "vendor_id": vendor_id,
+                "contract_phone": phone,
+                "account_on_file_masked": on_file,
+            }
+            refs = [verdict, vendor_id] if vendor_id else [verdict]
+        elif kind == "onboarding_verification":
+            vendor_name = str(ctx.get("vendor_name") or "")
+            known = any(
+                vendor_name.lower() in (s.legal_name.lower(), *[v.lower() for v in s.name_variants])
+                for s in self._suppliers.values()
+            )
+            if known:
+                verdict, template = (
+                    "confirmed",
+                    f"Yes, we buy from {vendor_name}; the invoice looks right to me. {_first_name(person)}",
+                )
+            else:
+                verdict, template = (
+                    "denied",
+                    f"I do not know {vendor_name} and I have not ordered anything from them. Please do not pay until purchasing has onboarded them. {_first_name(person)}",
+                )
+            facts = {"verdict": verdict, "vendor_name": vendor_name}
+            refs = [verdict]
+        else:
+            verdict, template = "acknowledged", f"Noted, thank you. {_first_name(person)}"
+            facts = {"verdict": verdict}
+            refs = []
+        body, wording = self._word(person, channel, message, template, {**ctx, "facts": facts})
+        return Reply(
+            person_id=person.id,
+            channel=channel,
+            body=body,
+            delay_hours=delay,
+            refs=refs,
+            bounced=False,
+            facts={**facts, "mailbox_compromised": compromised},
+            wording=wording,
+        )
+
+    def deliver(
+        self,
+        reply: Reply,
+        *,
+        in_reply_to: str,
+        thread_id: str | None,
+        sim_time: datetime,
+        refs: Sequence[str] = (),
+        subject: str | None = None,
+    ) -> Event | None:
+        """Schedule the ``colleague_reply`` on the clock. When the world already carries this
+        person's reply in the same thread (T8's in-thread confirmation), nothing is scheduled."""
+        if thread_id and self._world_reply_exists(reply.person_id, thread_id, after=sim_time):
+            return None
         when = sim_time + timedelta(hours=reply.delay_hours)
-        person = responder.person
+        person = self._people[reply.person_id]
         payload = {
-            "message_id": f"<{when:%Y%m%d%H%M%S}.{re.sub(r'[^0-9a-f]', '', asked_event_id)[:12]}@{COMPANY_DOMAIN}>",
+            "message_id": f"<{when:%Y%m%d%H%M%S}.{re.sub(r'[^0-9a-f]', '', in_reply_to)[:12]}@{COMPANY_DOMAIN}>",
             "person_id": person.id,
-            "channel": "chat",
-            "in_reply_to": asked_event_id,
-            "thread_id": asked_event_id,
-            "subject": None,
+            "channel": reply.channel
+            if reply.channel in ("email", "phone", "chat", "portal")
+            else "chat",
+            "in_reply_to": in_reply_to,
+            "thread_id": thread_id or in_reply_to,
+            "subject": subject,
             "body": reply.body,
             "eml_path": None,
-            "refs": list(dict.fromkeys([*query.refs, *reply.refs])),
-            "bounced": "bounced" in reply.refs,
+            "refs": list(dict.fromkeys([*refs, *reply.refs])),
+            "bounced": reply.bounced,
         }
-        self._clock.schedule(
-            make_event(
-                "colleague_reply", payload, event_time=when, source="chat", actor=person.email
-            )
+        ev = make_event(
+            "colleague_reply", payload, event_time=when, source="people", actor=person.email
         )
+        self._clock.schedule(ev)
+        if self._truth is not None:
+            self._truth.record(
+                ev.id,
+                person.id,
+                mailbox_compromised=bool(reply.facts.get("mailbox_compromised")),
+                note=reply.facts.get("verdict", ""),
+            )
+        return ev
+
+    def _world_reply_exists(self, person_id: str, thread_id: str, *, after: datetime) -> bool:
+        """A reply by this person in this thread that the world already carries (delivered or still
+        pending) stands in for anything the runtime would generate."""
+        del after
+        for e in self._events():
+            if (
+                e.type == "colleague_reply"
+                and e.payload.get("person_id") == person_id
+                and e.payload.get("thread_id") == thread_id
+            ):
+                return True
+        return False
+
+    def _delay(self, person_id: str, channel: str, thread: str) -> float:
+        lo, hi = REPLY_DELAY_HOURS.get(channel, (1.0, 4.0))
+        return round(
+            random.Random(f"{self._seed}:{person_id}:{channel}:{thread}").uniform(lo, hi), 1
+        )
+
+    def _word(
+        self, person: Person, channel: str, message: str, template: str, context: dict[str, Any]
+    ) -> tuple[str, str]:
+        persona = getattr(self._llm, "persona_reply", None)
+        if callable(persona):
+            text = persona(
+                person.model_dump(mode="json"),
+                {"channel": channel, "message": message, "template": template, **context},
+            )
+            if isinstance(text, str) and text.strip():
+                return text.strip(), "persona"
+        return template, "template"
+
+    # ------------------------------------------------------------------ Part 3: agent queries
+
+    def ask(self, query: ColleagueQuery, *, asked_event_id: str, sim_time: datetime) -> None:
+        responder = self._scripted.get(query.to_person)
+        if responder is None:
+            return
+        scripted = responder.reply(query, sim_time)
+        if scripted is None:
+            return
+        reply = Reply(
+            person_id=query.to_person,
+            channel="chat",
+            body=scripted.body,
+            delay_hours=scripted.delay_hours,
+            refs=scripted.refs,
+            bounced="bounced" in scripted.refs,
+            facts={},
+        )
+        self.deliver(
+            reply,
+            in_reply_to=asked_event_id,
+            thread_id=asked_event_id,
+            sim_time=sim_time,
+            refs=query.refs,
+        )
+
+
+Responders = People
+
+
+class AutoController:
+    """Marta Nowak deciding packets when no human is on the phone (AUTO_CONTROLLER=1): approves
+    only complete evidence (three rows or more) and never a packet that itself recommends a phone
+    verification; packets without an approve/deny pair follow their recommendation when complete."""
+
+    principal = "controller"
+    subscribes = frozenset({"escalation"})
+
+    def __init__(self, packets: Any, *, person_id: str = "marta.nowak") -> None:
+        self._packets = packets
+        self._person_id = person_id
+
+    def decide(self, packet: Any) -> tuple[str | None, str]:
+        rows = len(packet.evidence)
+        option_ids = [o.id for o in packet.options]
+        reasons: list[str] = []
+        if rows < 3:
+            reasons.append(f"1. Evidence has {rows} row(s); I need at least three.")
+        if packet.recommendation == "request_phone_verification":
+            reasons.append(
+                "2. The agent itself recommends a phone verification; approving would skip it."
+            )
+        if "approve" in option_ids:
+            if reasons:
+                negative = (
+                    "deny"
+                    if "deny" in option_ids
+                    else ("reject" if "reject" in option_ids else None)
+                )
+                return negative, " ".join(reasons) or "denied"
+            return "approve", "Evidence complete; recommendation followed."
+        if reasons:
+            return None, " ".join(reasons)
+        return packet.recommendation, "Evidence complete; recommendation followed."
+
+    def handle(self, ev: Event, ctx: Any) -> list[Event]:
+        packet = self._packets.get(str(ev.payload["packet_id"]))
+        if packet is None or packet.decision is not None:
+            return []
+        decision, note = self.decide(packet)
+        if decision is None:
+            return []
+        self._packets.decide_packet(
+            packet.id, decision, note, self._person_id, via="phone", decided_at=ctx.now
+        )
+        return []

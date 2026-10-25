@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from collections.abc import Callable, Sequence
 from datetime import UTC, date, datetime, time, timedelta
@@ -45,7 +46,8 @@ def run_world(
     until: str,
     cache_db: Path | None = None,
     llm: Any | None = None,
-    agents: Sequence[str] = ("invoice", "payment"),
+    agents: Sequence[str] = ("invoice", "payment", "vendor"),
+    auto_controller: bool = False,
     before_start: Callable[[Runtime], None] | None = None,
     each_day: Callable[[Runtime, date], None] | None = None,
 ) -> RunResult:
@@ -70,6 +72,7 @@ def run_world(
         agents=agents,
         cache_db=cache_db,
         beancount_path=bean,
+        auto_controller=auto_controller,
     )
     try:
         start_runtime(rt)
@@ -79,8 +82,10 @@ def run_world(
         end = date.fromisoformat(until)
         while clock.sim_now.date() <= end:
             day = clock.sim_now.date()
-            # the morning: statements arrive at 06:00 and the payment run follows them
-            clock.advance_to(datetime.combine(day, time(6, 30), tzinfo=UTC))
+            # the morning: statements arrive at 06:00 and the payment run follows them; two more
+            # drains keep the desk's latency on messages and replies under a working half-day
+            for hour, minute in ((6, 30), (12, 0), (18, 0)):
+                clock.advance_to(datetime.combine(day, time(hour, minute), tzinfo=UTC))
             clock.advance_to(datetime.combine(day + timedelta(days=1), time(0, 0), tzinfo=UTC))
             daily.append(rt.ledger.ap_control_reconciles().ok)
             if each_day is not None:
@@ -136,7 +141,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", type=Path, default=Path("runs/part4"))
     parser.add_argument("--until", default="2026-11-05")
     parser.add_argument("--cache-db", type=Path, default=Path(".cache/llm_cache.db"))
-    parser.add_argument("--agents", default="invoice,payment")
+    parser.add_argument("--agents", default="invoice,payment,vendor")
+    parser.add_argument(
+        "--auto-controller", action="store_true", default=os.environ.get("AUTO_CONTROLLER") == "1"
+    )
     args = parser.parse_args(argv)
     structlog.configure(
         processors=[
@@ -153,6 +161,7 @@ def main(argv: list[str] | None = None) -> int:
         until=args.until,
         cache_db=args.cache_db,
         agents=tuple(args.agents.split(",")),
+        auto_controller=args.auto_controller,
     )
     out = {
         "scoreboard": result.report.model_dump(mode="json"),

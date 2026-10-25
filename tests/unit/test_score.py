@@ -283,3 +283,81 @@ def test_every_check_kind_and_case_lifecycle(tmp_path: Path) -> None:
     ledger.close()
     vendors.close()
     store.close()
+
+
+def _anomaly(store: EventStore, packet_id: str, refs: list[str]) -> None:
+    store.append(
+        make_event(
+            "escalation",
+            {
+                "packet_id": packet_id,
+                "agent": "vendor_agent",
+                "question": "q",
+                "severity": "urgent",
+                "refs": refs,
+                "context": "c",
+                "evidence": [],
+                "materiality_minor": None,
+                "currency": None,
+                "recommendation": "acknowledge",
+                "recommendation_reason": "r",
+                "options": ["acknowledge"],
+                "expires_at": None,
+                "auto_action_on_expiry": "hold",
+                "kind": "anomaly",
+            },
+            event_time=NOW,
+            source="agent",
+        )
+    )
+
+
+def test_escalations_about_judge_injected_vendors_are_not_false_positives(tmp_path: Path) -> None:
+    db = tmp_path / "pg.db"
+    store = EventStore(db)
+    ledger = Ledger(db, events=store, fx=full_synthetic_fx(), now=lambda: NOW)
+    key = AnswerKey(seed=1, headline=[], ambient=[])
+    board = Scoreboard(
+        key, store=store, ledger=ledger, vendors=VendorMaster(db), truth=None, now=lambda: NOW
+    )
+    _anomaly(store, "PK-1", ["V-0042", "VBA-000042"])
+    assert board.evaluate().headline.fp == 1, "an alarm on a planted vendor nobody asked about"
+    message = store.append(
+        make_event(
+            "vendor_message",
+            {
+                "message_id": "<judge-1@judge.example>",
+                "channel": "email",
+                "vendor_id": None,
+                "claimed_supplier_name": "Horák Sedačky s.r.o.",
+                "from_address": "x@horak.example",
+                "reply_to": None,
+                "to": "ap-invoices@tbeu.example",
+                "subject": "s",
+                "body": "b",
+                "eml_path": None,
+                "in_reply_to": None,
+                "thread_id": "thr_judge_V-0009",
+                "attachments": [],
+                "bank_details": None,
+            },
+            event_time=NOW,
+            source="judge",
+        )
+    ).event
+    store.append(
+        make_event(
+            "judge_injection",
+            {
+                "kind": "message",
+                "submitted_by": "judge",
+                "form": {"supplier_id": "V-0009", "channel": "email"},
+                "resulting_event_id": message.id,
+            },
+            event_time=NOW,
+            source="judge",
+        )
+    )
+    _anomaly(store, "PK-2", ["V-0009", "VBA-000009", message.id])
+    _anomaly(store, "PK-3", ["thr_judge_V-0009"])
+    assert board.evaluate().headline.fp == 1, "the judge asked for those two"

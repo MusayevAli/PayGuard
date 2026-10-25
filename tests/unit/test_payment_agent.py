@@ -31,7 +31,7 @@ def events(kit: Kit, type_: str) -> list:
 
 
 def test_due_payable_is_signed_executed_posted_and_reconciled(kit: Kit) -> None:
-    p = kit.payable(V_EUR, 100_000, due=date(2026, 10, 3), number="FT-500")
+    p = kit.payable(V_EUR, 100_000, due=date(2026, 10, 2), number="FT-500")
     kit.tick(days=1)  # 2 Oct boundary: due within two days
     req = events(kit, "payment_requested")
     assert (
@@ -76,13 +76,15 @@ def test_due_payable_is_signed_executed_posted_and_reconciled(kit: Kit) -> None:
 
 
 def test_unprovisioned_vendor_is_held_not_allowlisted_and_never_retried(kit: Kit) -> None:
-    p = kit.payable(V_UNPROVISIONED, 50_000, due=date(2026, 10, 3))
+    p = kit.payable(V_UNPROVISIONED, 50_000, due=date(2026, 10, 2))
     kit.tick(days=1)
     chip = events(kit, "chip_response")
     assert (
         len(chip) == 1
         and not chip[0].payload["ok"]
         and chip[0].payload["reasons"] == ["not_allowlisted"]
+        and chip[0].payload["chip_reason"] == "not_allowlisted"
+        and chip[0].payload["desk_annotations"] == []
     )
     held = kit.actions(action_type="payment_held")
     assert len(held) == 1 and held[0]["decision"]["held_reason"] == "not_allowlisted"
@@ -112,7 +114,7 @@ def test_unprovisioned_vendor_is_held_not_allowlisted_and_never_retried(kit: Kit
 
 
 def test_payment_above_threshold_needs_the_button(kit: Kit) -> None:
-    p = kit.payable(V_EUR, 6_000_000, due=date(2026, 10, 3), number="FT-501")
+    p = kit.payable(V_EUR, 6_000_000, due=date(2026, 10, 2), number="FT-501")
     kit.tick(days=1)
     chip = events(kit, "chip_response")
     assert len(chip) == 1 and chip[0].payload["reasons"] == ["needs_button"]
@@ -142,7 +144,7 @@ def test_payment_above_threshold_needs_the_button(kit: Kit) -> None:
 
 
 def test_rejected_button_packet_keeps_the_payable_held(kit: Kit) -> None:
-    p = kit.payable(V_EUR, 6_000_000, due=date(2026, 10, 3))
+    p = kit.payable(V_EUR, 6_000_000, due=date(2026, 10, 2))
     kit.tick(days=1)
     pk = kit.packets_open(kind="approval")[0].payload
     kit.decide(pk["packet_id"], "reject")
@@ -200,7 +202,8 @@ def test_t9_cash_shortfall_produces_quantified_options_and_draw_pays(tmp_path: P
     )
     assert "2,640,000" in pk["question"] or "26,400.00" in pk["question"]
     assert "pay_partial_now" in pk["context"] and "draw_intercompany" in pk["context"]
-    held = kit.actions(action_type="held")
+    held = kit.actions(action_type="discount_escalated")
+    assert not kit.actions(action_type="held"), "a discount question is not a hold"
     assert (
         held
         and held[0]["decision"]["recommendation"] == "draw_intercompany"
@@ -271,7 +274,7 @@ def test_t9_skip_discount_pays_in_full_at_the_due_date(tmp_path: Path) -> None:
     p = kit.payable(
         V_EUR,
         18_000_000,
-        due=date(2026, 10, 5),
+        due=date(2026, 10, 4),
         discount_bp=200,
         discount_deadline=date(2026, 10, 2),
     )
@@ -280,7 +283,7 @@ def test_t9_skip_discount_pays_in_full_at_the_due_date(tmp_path: Path) -> None:
     kit.decide(pk["packet_id"], "skip_discount")
     assert events(kit, "payment_requested") == []
     kit.bank.credit("EUR", 5_000_000, reference="FUNDING-1", remittance="/REMI/CUSTOMER SETTLEMENT")
-    kit.tick(days=2)  # 4 Oct: due within two days, paid in full, no discount
+    kit.tick(days=2)  # 4 Oct: due today, paid in full, no discount
     pay = next(e for e in kit.ledger.entries() if e.cause_type == "payment")
     assert kit.line(pay, "Assets:Bank:EUR").credit_minor == 18_000_000
     assert kit.ledger.get_payable(p.id).status == "paid"
@@ -289,7 +292,7 @@ def test_t9_skip_discount_pays_in_full_at_the_due_date(tmp_path: Path) -> None:
 
 
 def test_credit_note_nets_against_the_next_payment(kit: Kit) -> None:
-    p = kit.payable(V_EUR, 100_000, due=date(2026, 10, 3))
+    p = kit.payable(V_EUR, 100_000, due=date(2026, 10, 2))
     cn = kit.payable(V_EUR, -30_000, due=date(2026, 10, 1), inv_id="CN-12")
     kit.tick(days=1)
     req = events(kit, "payment_requested")[0].payload
@@ -422,26 +425,27 @@ def test_retention_payables_are_never_scheduled(kit: Kit) -> None:
 def test_daily_cap_defers_without_holding(tmp_path: Path) -> None:
     kit = Kit(tmp_path, payments=True, daily_cap=150_000)
     kit.provision(V_EUR, V_CZK)
-    small = kit.payable(V_EUR, 100_000, due=date(2026, 10, 3))
-    big = kit.payable(V_CZK, 120_000, due=date(2026, 10, 3), currency="EUR")
-    # the first tick carries two chip days (1 and 2 Oct): the first run pays 100,000 and defers the
-    # 120,000 that would exceed the 150,000 cap; the cap resets on the next chip day and it pays
-    kit.tick(days=1)
+    small = kit.payable(V_EUR, 100_000, due=date(2026, 10, 2))
+    big = kit.payable(V_CZK, 120_000, due=date(2026, 10, 2), currency="EUR")
+    kit.tick(
+        days=1
+    )  # chip days 1 and 2 Oct: both fall due on the 2nd; 100,000 fits, 120,000 would exceed the cap
     runs = kit.actions(action_type="payment_run_built")
-    assert len(runs) == 2
-    assert [p["pay_id"] for p in runs[0]["decision"]["paid"]] == ["PAY-000001"]
-    assert runs[0]["decision"]["deferred_cap"][0]["remaining_cap_minor"] == 50_000
-    assert runs[0]["decision"]["held"] == [], "a cap deferral is not a hold"
-    assert [p["pay_id"] for p in runs[1]["decision"]["paid"]] == ["PAY-000002"]
+    assert len(runs) == 2 and runs[0]["decision"]["paid"] == []
+    assert [p["pay_id"] for p in runs[1]["decision"]["paid"]] == ["PAY-000001"]
+    assert runs[1]["decision"]["deferred_cap"][0]["remaining_cap_minor"] == 50_000
+    assert runs[1]["decision"]["held"] == [], "a cap deferral is not a hold"
     assert kit.ledger.get_payable(small.id).status == "paid"
+    assert kit.ledger.get_payable(big.id).status == "open"
+    assert len(events(kit, "chip_response")) == 1
+    kit.tick(days=1)  # new chip day: cap resets
     assert kit.ledger.get_payable(big.id).status == "paid"
-    assert len(events(kit, "chip_response")) == 2
     kit.close()
 
 
 def test_usd_payable_settles_from_the_eur_account(kit: Kit) -> None:
     kit.provision("V-0040")
-    p = kit.payable("V-0040", 10_800, due=date(2026, 10, 3), currency="USD")
+    p = kit.payable("V-0040", 10_800, due=date(2026, 10, 2), currency="USD")
     kit.tick(days=1)
     executed = events(kit, "payment_executed")
     assert (
@@ -467,9 +471,10 @@ def test_insufficient_cash_defers_a_plain_payable(tmp_path: Path) -> None:
         tmp_path,
         payments=True,
         bank_opening={"EUR": 50_000, "CZK": 840_000_000, "PLN": 210_000_000},
+        overdraft={},
     )
     kit.provision(V_EUR)
-    p = kit.payable(V_EUR, 100_000, due=date(2026, 10, 3))
+    p = kit.payable(V_EUR, 100_000, due=date(2026, 10, 2))
     kit.tick(days=1)
     run = kit.actions(action_type="payment_run_built")[-1]
     assert (

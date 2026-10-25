@@ -28,14 +28,17 @@ ACCOUNT_CAP_EUR_MINOR: Final[int] = 250_000_000
 DAILY_CAP_EUR_MINOR: Final[int] = 300_000_000
 """Default daily cap: EUR 3,000,000.00 of signed payments per chip day."""
 NONCE_TIMEOUT_DAYS: Final[int] = 1
-PAY_LEAD_DAYS: Final[int] = 2
-"""A payable joins the run when it falls due within this many days."""
+PAY_LEAD_DAYS: Final[int] = 0
+"""A payable joins the run on its due date (value date = due date)."""
 DISCOUNT_LEAD_DAYS: Final[int] = 0
 """A discount is taken on its deadline day, the latest value date that still earns it."""
 RECON_GRACE_DAYS: Final[int] = 2
 """Unmatched statement lines become a notice packet after this many days."""
 INTERCOMPANY_RATE_BP: Final[int] = 400
 """Assumed annual cost of an intercompany draw (4 %), used to quantify T9 options."""
+OVERDRAFT_LIMIT_MINOR: Final[dict[str, int]] = {"EUR": 100_000_000, "CZK": 0, "PLN": 0}
+"""Agreed overdraft per account (EUR 1,000,000.00 on the EUR account): due payments may use it,
+discount payments may not (T9 asks first)."""
 
 BOX50: Final[int] = 50
 

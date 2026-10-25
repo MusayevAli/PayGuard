@@ -270,3 +270,89 @@ Choices the spec left open, with the reasoning. Newest at the bottom of each par
 67. **API.** `create_app(desk=False)` is the bare clock/transport server the Part 1 tests exercise;
     the full app builds the runtime, bootstraps and provisions at startup. `SIGNER=hw` is refused with
     a message until Part 7.
+
+## Part 5 — vendor agent, people, packets, controller phone
+
+68. **64 allowlist slots** (`MAX_SLOTS = 64`, `proto/FRAME.md` slots `0x00`–`0x3F`). Provisioning at
+    startup puts every active, approved account on the chip (`Provisioner.provision_all`, jumper
+    raised then pulled); the queue is only for accounts activated later or beyond the slot count.
+    The RTL compares the frame's hash against the slot table sequentially from BRAM (64 × 32 bytes,
+    64 cycles), so the slot count costs nothing in logic. `tests/vectors.json` has 54 cases: slot 63
+    provisioned and paid (`prov_slot63`, `pay_slot63`), slot `0x40` rejected `bad_slot`, every reason
+    code.
+69. **The bank binds the native amount.** The frame carries EUR cents; the bank recomputes the native
+    amount from them at the `rate_date` logged on `payment_requested` and rejects a request whose
+    native amount differs by more than one EUR cent in native units (`ceil(rate / 2)` minor units)
+    with `bank_rejected{amount_mismatch}` plus a `system_error`; the payables are held. A tampered
+    `payment_requested` can no longer move more than the chip signed.
+70. **Channel rule.** Spec §7.4 prints `email → phone; portal → email; invoice → phone`, which
+    contradicts T7 ("verified by phone" for a portal request), T8 (Petra's email confirmation) and the
+    answer key (T7 recommends `approve`, T8 `request_phone_verification`). Implemented:
+    `portal → phone`, `email → email to the contact on file (never the sender's thread)`,
+    `invoice → phone`, `judge → phone`, `phone → email`. The packet recommends `approve` after a
+    phone verification and `request_phone_verification` after an email one.
+71. **Activation needs a second channel, even after approval.** The policy refuses
+    `ActivateIfReady` when `verified_via == requested_via`. If the controller approves an
+    email-verified change anyway, the desk phones the contact when the hold ends
+    (`verification_requested{reason: same_channel_before_activation}`); a confirmed call becomes the
+    account's verification (`MarkVerified(phone)`) and activation follows; a denial suspends the
+    account and raises the urgent "denied" packet. A phone recheck the controller asked for works the
+    same way. Any other policy refusal of a scheduled activation is reported once as a `notice`
+    packet and never retried daily.
+72. **`chip_response` fields.** `chip_reason` is the one code the chip returned (or null when ok);
+    `desk_annotations` is host state (`in_hold` while the account's hold has not elapsed);
+    `reasons` stays their union for older readers. T8's check reads `chip_reason` and
+    `annotations_contains`.
+73. **An approved pending account is paid at once.** `RequestPayment` accepts a pending account that
+    is verified and approved; the chip's allowlist and hold are the stop, and the desk annotates
+    `in_hold`. That is how T8 reaches the chip on the due date. R9 fires only for a pending account or
+    an account activated within 72 hours that is on the chip; an active account the chip does not
+    carry yet sits in the provisioning queue and is the payment desk's `not_allowlisted` hold, not
+    an attack.
+74. **Cash.** `PAY_LEAD_DAYS = 0`: a payable is paid on its due date (two days early would have paid
+    KT-2270 before the change was even confirmed). Due payments may draw the overdraft line
+    (`OVERDRAFT_LIMIT_MINOR`: EUR 1,000,000, none in CZK/PLN); discount payments need positive cash.
+    The T9 shortfall is the part of the payment positive cash cannot fund (an account already
+    overdrawn for due payments does not inflate the intercompany option). The T9 question is logged
+    as `discount_escalated`, not `held`: the payable stays open and is paid at its due date whatever
+    the answer, so it is not a prevented payment and the scoreboard does not count it as a false
+    positive.
+75. **Timers.** `timer{agent, purpose, refs, due_at, key}` is an event the agent schedules on the clock
+    (activation at `hold_until`); the day-boundary sweep over `scheduled_activations` is the
+    fallback. Timers fire at the next drain after `due_at`.
+76. **People layer.** `People.reply` returns facts from the hidden scripts (`confirms_bank_change_for`,
+    `mailbox_compromised_from`, `phone_reply`, `successor_id`) and wording from the persona model
+    only when credentials exist (`LLMClient.persona_reply`, cached, verdict words validated),
+    otherwise per-person templates; both paths produce the same `colleague_reply` shape. Delivery is
+    a clock-scheduled event after a seeded delay (email 2–30 h, phone 1–3 h, portal 6–12 h). A
+    world `colleague_reply` by the same person in the same thread stands in for a generated one, so
+    T8 has exactly one Petra confirmation. `mailbox_compromised` lives in the `ground_truth` SQLite
+    table (`People(truth_store=…)`, aliased `PeopleTruth` in the runtime so the guard test that
+    keeps `ground_truth` out of `agents/` holds) and never in a payload. Marta
+    (`AutoController`, `AUTO_CONTROLLER=1`) denies packets with fewer than three evidence rows or a
+    `request_phone_verification` recommendation and otherwise follows the recommendation.
+77. **Vendor agent trail.** Every message yields `message_classified`; a lookalike sender yields
+    `domain_flagged` (rule null, non-blocking). Unknown vendors on invoices become a
+    `vendor_message{channel: invoice}` emitted by the invoice agent before `onboarding_opened`, so
+    onboarding and bank changes share one entry point. M2 asks the successor only after a bounce
+    (`550`), never merely because the contact is inactive. Duplicate requests for the same account
+    hash are `matched`, not reopened.
+78. **R9 packet.** Rows: original request, verification path, chip rejection, account on file since
+    <date>; options `call_supplier_on_contract_number` (recommended, with the contract phone in the
+    label, reason and context), `pay_prior_account`, `cancel_payment`; severity urgent; expires in 7
+    days; the payment and its payables are `held awaiting_controller`. A vendor without any prior
+    account gets no `account_restored` action; the packet says "none". The scoreboard resolves a
+    chip response's refs to the payment's vendor, payables and invoice numbers.
+79. **Judge messages are not false positives.** `POST /judge/message` writes the `vendor_message`
+    (source `judge`) and a `judge_injection{form, resulting_event_id}`; the scoreboard excludes
+    escalations and holds whose refs touch a judge-injected vendor, message, thread or invoice from
+    the false-positive count. Judges can test Petra's script freely without lowering the score.
+80. **Harness cadence.** `scripts/run_world.py` drains at 06:30 (statements, payment run), 12:00 and
+    18:00, then at midnight; the operator hook runs after midnight. The desk's latency on a message
+    or a reply is at most a working half-day, which is what T8 needs (the confirmation at 10:40 is
+    handled at 12:00, approved overnight, and the payment run on the due date targets the approved
+    account).
+81. **Phone API.** `GET /packets?status=`, `GET /packets/{id}` (rendered), `POST /packets/{id}/decide`
+    (idempotent; the decision drains the runner so the flow continues in the same request),
+    `GET /vendors/{id}` and `/accounts/history` with masked IBANs. `Context.with_principal` lets the
+    vendor agent carry out a controller decision under the `controller` principal, logged as such.

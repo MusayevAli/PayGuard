@@ -28,7 +28,7 @@ hardware must accept exactly what the stub accepts and answer exactly what the s
 
 | Byte 1 `slot` | Body | Meaning |
 |---|---|---|
-| `0x00`–`0x0F` | 2–33 `account_hash`, 34–41 `account_cap` u64, 42–43 `hold_until_day` u16 | allowlist slot; caps in EUR-equivalent minor units |
+| `0x00`–`0x3F` | 2–33 `account_hash`, 34–41 `account_cap` u64, 42–43 `hold_until_day` u16 | one of 64 allowlist slots; caps in EUR-equivalent minor units |
 | `0xFE` | 2–9 `daily_cap` u64 | daily cap |
 | `0xFD` | 2–9 `button_threshold` u64 | payments above it need a button nonce |
 | `0xFC` | 2–3 `nonce_timeout_days` u16 | a button nonce expires after this many day ticks (default 1) |
@@ -83,7 +83,8 @@ exactly one payment.
 
 ## State
 
-`allow_hash[16][256]`, `allow_cap[16][64]`, `hold_until_day[16][16]`, `daily_cap[64]`,
+`allow_hash[64][256]`, `allow_cap[64][64]`, `hold_until_day[64][16]` (the RTL keeps these in BRAM and
+compares the 64 hashes sequentially; no parallel comparators), `daily_cap[64]`,
 `daily_spent[64]`, `button_threshold[64]` (default EUR 50,000.00 = 5,000,000), `key[256]`
 (all-zero until loaded; payments then carry an unverifiable tag and the bank rejects them),
 `seq[32]`, `nonce[32]`, `nonce_valid`, `nonce_day[16]`, `nonce_timeout_days[16]`, `day[16]`.

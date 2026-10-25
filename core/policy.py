@@ -16,7 +16,7 @@ import structlog
 
 from core.events import EventStore, make_event
 from core.rules import BUTTON_THRESHOLD_MINOR
-from core.vendors import VendorBankAccount, VendorMaster, account_hash
+from core.vendors import Vendor, VendorBankAccount, VendorMaster, account_hash
 
 if TYPE_CHECKING:
     from core.ledger import Evidence, JournalEntry, JournalEntryDraft, Ledger
@@ -158,6 +158,25 @@ class SetOnChipAction:
 
 
 @dataclass(frozen=True)
+class CreateVendorAction:
+    """Register a vendor the desk has never seen (R5 onboarding), in status ``onboarding``."""
+
+    vendor_id: str
+    legal_name: str
+    vat_id: str
+    country: str
+    currency: str
+    terms: str
+    contact_person: str
+
+
+@dataclass(frozen=True)
+class ActivateVendorAction:
+    vendor_id: str
+    approval_event_id: str | None
+
+
+@dataclass(frozen=True)
 class RequestPaymentAction:
     """Ask the signer to authorise a payment to ``account_id`` (spec §7.5, §8)."""
 
@@ -182,6 +201,8 @@ Action = (
     | RestorePriorAction
     | SetOnChipAction
     | RequestPaymentAction
+    | CreateVendorAction
+    | ActivateVendorAction
 )
 
 
@@ -259,6 +280,10 @@ class Policy:
                 return self._set_on_chip(action, principal, scope)
             if isinstance(action, RequestPaymentAction):
                 return self._request_payment(action, principal, scope)
+            if isinstance(action, CreateVendorAction):
+                return self._create_vendor(action, principal, scope)
+            if isinstance(action, ActivateVendorAction):
+                return self._activate_vendor(action, principal, scope)
         except PolicyViolation:
             raise
 
@@ -644,12 +669,17 @@ class Policy:
                 f"account {acct.id} belongs to {acct.vendor_id}, not {action.vendor_id}",
                 refs=[action.pay_id, acct.id, action.vendor_id],
             )
-        if acct.status != "active":
+        approved_pending = (
+            acct.status == "pending"
+            and acct.approved_by is not None
+            and acct.verified_via is not None
+        )
+        if acct.status != "active" and not approved_pending:
             self._violation(
                 principal,
                 action,
                 "account_not_active",
-                f"account {acct.id} is {acct.status}; only active accounts may be paid",
+                f"account {acct.id} is {acct.status}; only active or approved accounts may be paid",
                 refs=[action.pay_id, acct.id],
             )
         log.info(
@@ -663,6 +693,81 @@ class Policy:
             rule_id="R10" if action.eur_equiv_minor > BUTTON_THRESHOLD_MINOR else None,
         )
         return acct
+
+    def _create_vendor(self, action: CreateVendorAction, principal: str, scope: Scope) -> Vendor:
+        self._require(
+            scope.edit_vendor,
+            principal,
+            action,
+            "edit_vendor_required",
+            "creating a vendor needs edit_vendor scope",
+            [action.vendor_id],
+        )
+        existing = self._vendors.get_vendor(action.vendor_id)
+        if existing is not None and existing.status != "onboarding":
+            self._violation(
+                principal,
+                action,
+                "vendor_exists",
+                f"vendor {action.vendor_id} already exists with status {existing.status}",
+                refs=[action.vendor_id],
+            )
+        vendor = Vendor(
+            id=action.vendor_id,
+            legal_name=action.legal_name,
+            vat_id=action.vat_id,
+            country=action.country,
+            currency=action.currency,
+            terms=action.terms,
+            contact_person=action.contact_person,
+            status="onboarding",
+            merged_into=None,
+        )
+        self._vendors.upsert_vendor(vendor)
+        log.info(
+            "vendor_created", principal=principal, vendor_id=vendor.id, event_id=None, rule_id="R5"
+        )
+        return vendor
+
+    def _activate_vendor(
+        self, action: ActivateVendorAction, principal: str, scope: Scope
+    ) -> Vendor:
+        self._require(
+            scope.edit_vendor or scope.approve,
+            principal,
+            action,
+            "edit_vendor_required",
+            "activating a vendor needs edit_vendor scope",
+            [action.vendor_id],
+        )
+        vendor = self._vendors.get_vendor(action.vendor_id)
+        if vendor is None:
+            self._violation(
+                principal,
+                action,
+                "unknown_vendor",
+                f"no vendor {action.vendor_id}",
+                refs=[action.vendor_id],
+            )
+        assert vendor is not None
+        if vendor.status != "onboarding":
+            self._violation(
+                principal,
+                action,
+                "not_onboarding",
+                f"vendor {vendor.id} is {vendor.status}, not onboarding",
+                refs=[vendor.id],
+            )
+        activated = vendor.model_copy(update={"status": "active"})
+        self._vendors.upsert_vendor(activated)
+        log.info(
+            "vendor_activated",
+            principal=principal,
+            vendor_id=vendor.id,
+            event_id=action.approval_event_id,
+            rule_id="R5",
+        )
+        return activated
 
     def _set_on_chip(
         self, action: SetOnChipAction, principal: str, scope: Scope

@@ -34,6 +34,7 @@ HASH_A = hashlib.sha256(b"DE44500105175407324931").digest()
 HASH_B = hashlib.sha256(b"CZ4701000000190000259317").digest()
 HASH_C = hashlib.sha256(b"PL10105000997603123456789123").digest()
 HASH_D = hashlib.sha256(b"DE02120300000000202051").digest()
+HASH_E = hashlib.sha256(b"AT611904300234573201").digest()
 HASH_X = hashlib.sha256(b"GB33BUKB20201555555555").digest()  # never provisioned
 
 CAP_A = 250_000
@@ -114,6 +115,12 @@ def scenario() -> list[dict[str, Any]]:
         jumper=True,
     )
     step(
+        "prov_slot63",
+        "allowlist slot 63 (E), the last of the 64 slots",
+        ProvisionFrame(slot=63, account_hash=HASH_E, account_cap=CAP_D, hold_until_day=DAY0),
+        jumper=True,
+    )
+    step(
         "prov_slot3_c",
         "allowlist slot 3 (C) for the per-currency happy paths",
         ProvisionFrame(slot=3, account_hash=HASH_C, account_cap=CAP_D, hold_until_day=DAY0),
@@ -134,9 +141,14 @@ def scenario() -> list[dict[str, Any]]:
     bad_slot = bytearray(
         encode(ProvisionFrame(slot=0, account_hash=HASH_A, account_cap=1, hold_until_day=0))
     )
-    bad_slot[1] = 0x10
+    bad_slot[1] = 0x40
     bad_slot[62:64] = crc16(bytes(bad_slot[:62])).to_bytes(2, "big")
-    step("prov_bad_slot", "provisioning slot 0x10 is malformed", bytes(bad_slot), jumper=True)
+    step(
+        "prov_bad_slot",
+        "provisioning slot 0x40 (the 65th) is malformed",
+        bytes(bad_slot),
+        jumper=True,
+    )
     step("status_provisioned", "status after provisioning", StatusFrame())
     step("day_tick_273", "first day tick (2026-10-01)", DayTickFrame(day=DAY0))
     step(
@@ -260,28 +272,33 @@ def scenario() -> list[dict[str, Any]]:
     step("pay_czk", "happy path CZK", _pay(9, HASH_C, 50_000, "CZK", pay_id="PAY-000009"))
     step("pay_jpy", "happy path JPY", _pay(10, HASH_C, 50_000, "JPY", pay_id="PAY-000010"))
     step("pay_usd", "happy path USD", _pay(11, HASH_C, 50_000, "USD", pay_id="PAY-000011"))
-    step("malformed_short", "63-byte frame is malformed", encode(_pay(12, HASH_A, 1, "EUR"))[:63])
+    step(
+        "pay_slot63",
+        "a payment from slot 63 signs like any other",
+        _pay(12, HASH_E, 50_000, "EUR", pay_id="PAY-000012"),
+    )
+    step("malformed_short", "63-byte frame is malformed", encode(_pay(13, HASH_A, 1, "EUR"))[:63])
     bad_type = bytearray(encode(StatusFrame()))
     bad_type[0] = 0x09
     bad_type[62:64] = crc16(bytes(bad_type[:62])).to_bytes(2, "big")
     step("malformed_type", "unknown frame type 0x09", bytes(bad_type))
-    bad_ccy = bytearray(encode(_pay(12, HASH_A, 1, "EUR", pay_id="PAY-000012")))
+    bad_ccy = bytearray(encode(_pay(13, HASH_A, 1, "EUR", pay_id="PAY-000013")))
     bad_ccy[45] = 0x07
     bad_ccy[62:64] = crc16(bytes(bad_ccy[:62])).to_bytes(2, "big")
     step("malformed_currency", "unknown currency code 0x07", bytes(bad_ccy))
-    bad_id = bytearray(encode(_pay(12, HASH_A, 1, "EUR", pay_id="PAY-000012")))
+    bad_id = bytearray(encode(_pay(13, HASH_A, 1, "EUR", pay_id="PAY-000013")))
     bad_id[50] = 0x00
     bad_id[62:64] = crc16(bytes(bad_id[:62])).to_bytes(2, "big")
     step("malformed_pay_id", "non-ASCII pay_id", bytes(bad_id))
     step(
         "bad_crc",
         "corrupted CRC",
-        corrupt_crc(encode(_pay(12, HASH_A, 1, "EUR", pay_id="PAY-000012"))),
+        corrupt_crc(encode(_pay(13, HASH_A, 1, "EUR", pay_id="PAY-000013"))),
     )
     step(
         "seq_unchanged_after_rejects",
-        "seq 12 still next after all the rejects",
-        _pay(12, HASH_A, 1, "EUR", pay_id="PAY-000012"),
+        "seq 13 still next after all the rejects",
+        _pay(13, HASH_A, 1, "EUR", pay_id="PAY-000013"),
     )
     step(
         "prov_locked_after_pull",

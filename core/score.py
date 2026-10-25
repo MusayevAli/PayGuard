@@ -202,9 +202,17 @@ class Scoreboard:
         if kind == "chip_response":
             for e in self._store.query(type="chip_response", limit=100000):
                 body = e.payload
-                if not match_where({**body, "refs": [body.get("pay_id", "")]}, check.where):
+                if not match_where(
+                    {**body, "refs": self._payment_refs(str(body.get("pay_id", "")))}, check.where
+                ):
                     continue
                 if body.get("ok") != check.ok:
+                    continue
+                if check.chip_reason is not None and body.get("chip_reason") != check.chip_reason:
+                    continue
+                if not all(
+                    a in body.get("desk_annotations", []) for a in check.annotations_contains
+                ):
                     continue
                 if all(r in body.get("reasons", []) for r in check.reasons_contains):
                     return CheckResult(kind=kind, ok=True, detail=e.id)
@@ -246,8 +254,43 @@ class Scoreboard:
 
     # ------------------------------------------------------------------ report
 
+    def _payment_refs(self, pay_id: str) -> list[str]:
+        """What a chip response is about: the payment, its vendor, payables, invoices and numbers."""
+        refs = [pay_id]
+        for req in self._store.query(type="payment_requested", limit=100000):
+            if req.payload.get("pay_id") != pay_id:
+                continue
+            refs.append(str(req.payload.get("vendor_id")))
+            payable_ids = {str(x) for x in req.payload.get("payable_ids", [])}
+            for p in self._ledger.payables():
+                if p.id in payable_ids:
+                    refs.append(p.inv_id)
+                    inv = self._truth.get(p.inv_id)
+                    if inv is not None:
+                        refs.append(inv.invoice_number)
+        return list(dict.fromkeys(refs))
+
+    def _judge_refs(self) -> set[str]:
+        """Vendors, messages and threads the judge injected at the tablet: the desk's reaction to
+        them is what was asked for, never a false alarm on the planted world."""
+        refs: set[str] = set()
+        for e in self._store.query(type="judge_injection", limit=100000):
+            form = e.payload.get("form") or {}
+            refs.update(str(form[k]) for k in ("supplier_id", "supplier_name") if form.get(k))
+            rid = e.payload.get("resulting_event_id")
+            res = self._store.get(str(rid)) if rid else None
+            if res is not None:
+                refs.add(res.id)
+                refs.update(
+                    str(res.payload[k])
+                    for k in ("vendor_id", "message_id", "thread_id", "invoice_id")
+                    if res.payload.get(k)
+                )
+        return refs
+
     def _false_positives(self) -> int:
         refs_by_case: list[set[str]] = [set(e.refs) for e in self._key.headline + self._key.ambient]
+        judge = self._judge_refs()
         fp = 0
         for ev in self._store.query(type="escalation", limit=100000) + [
             e
@@ -260,6 +303,8 @@ class Scoreboard:
             # an action about an invoice is judged by its invoice ids alone: sharing a vendor or a
             # purchase order with a planted case does not make a hold on another invoice legitimate
             invoice_refs = {r for r in refs if r.startswith("INV-")}
+            if (invoice_refs & judge) or (not invoice_refs and refs & judge):
+                continue  # the judge asked for this one
             probe = invoice_refs or refs
             if not any(probe & case_refs for case_refs in refs_by_case):
                 fp += 1

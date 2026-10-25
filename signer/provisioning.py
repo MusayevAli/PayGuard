@@ -43,24 +43,6 @@ log = structlog.get_logger("provisioning")
 DEV_CHIP_KEY: Final[bytes] = hashlib.sha256(b"payguard dev chip key 2026").digest()
 """Development key shared by the stub and the mock bank; ``PAYGUARD_CHIP_KEY`` (hex) overrides it."""
 
-DEMO_VENDORS: Final[tuple[str, ...]] = (
-    "V-0001",  # Kovak Trim (T1, T8's legitimate account)
-    "V-0009",
-    "V-0034",
-    "V-0017",  # Metallbau Richter (T9)
-    "V-0008",
-    "V-0038",  # Alpenmech (T10)
-    "V-0018",
-    "V-0006",
-    "V-0028",
-    "V-0036",
-    "V-0040",  # the US supplier: USD settles from the EUR account
-    "V-0004",  # Lasertech Bohemia (T4 credit note netting)
-    "V-0013",
-    "V-0035",
-)
-"""The 14 accounts provisioned before the demo (spec §10.7): the vendors with the largest
-EUR-equivalent payables falling due inside the simulated window, leaving two free slots (T7)."""
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS provisioning_slots (
@@ -215,6 +197,19 @@ class Provisioner:
             )
             self._con.execute("DELETE FROM provisioning_queue WHERE vendor_id = ?", (vendor_id,))
         return self._event(vendor_id, acct.id, slot, acct.account_hash[:12], True, None)
+
+    def provision_all(self) -> list[Event]:
+        """Put every active vendor's eligible account on the chip (spec §10.7, 64 slots). Vendors
+        beyond the slot count stay queued until a slot frees up."""
+        out: list[Event] = []
+        for vendor in self._vendors.vendors():
+            if vendor.status != "active":
+                continue
+            acct = eligible_account(self._vendors, vendor.id)
+            if acct is None or acct.on_chip:
+                continue
+            out.append(self.enqueue(vendor.id))
+        return out
 
     def process_queue(self) -> list[Event]:
         """Provision everything queued while the jumper was absent (call with the jumper present)."""
